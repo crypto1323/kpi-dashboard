@@ -5,8 +5,7 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { requireAdmin } from "@/lib/dal";
 
-/** Media spend is a single figure per store x channel (annual contracts, not monthly),
- * editable at any time by HQ only — see the request that replaced the earlier monthly model. */
+/** Media spend is one HQ-editable figure per store x channel (annual contracts, not monthly). */
 export async function upsertChannelSpend(
   storeId: string,
   channelId: string,
@@ -18,7 +17,7 @@ export async function upsertChannelSpend(
   const amount = Number.parseInt(amountRaw, 10);
   if (!Number.isFinite(amount) || amount < 0) {
     redirect(
-      `/dashboard/report?level=store&storeId=${storeId}&error=${encodeURIComponent("金額を正しく入力してください。")}`,
+      `/dashboard/master/spend?storeId=${storeId}&error=${encodeURIComponent("金額を正しく入力してください。")}`,
     );
   }
 
@@ -32,10 +31,12 @@ export async function upsertChannelSpend(
 
   if (error) {
     redirect(
-      `/dashboard/report?level=store&storeId=${storeId}&error=${encodeURIComponent(error.message)}`,
+      `/dashboard/master/spend?storeId=${storeId}&error=${encodeURIComponent(error.message)}`,
     );
   }
 
+  revalidatePath("/dashboard/master/spend");
   revalidatePath("/dashboard/report");
-  redirect(`/dashboard/report?level=store&storeId=${storeId}`);
+  revalidatePath("/dashboard/patients");
+  redirect(`/dashboard/master/spend?storeId=${storeId}`);
 }

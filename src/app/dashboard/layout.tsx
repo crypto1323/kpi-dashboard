@@ -29,12 +29,14 @@ export default async function DashboardLayout({
         <div className="flex items-center gap-3">
           {profile.role !== "area_manager" && (
             <Button variant="ghost" size="sm" render={<Link href="/dashboard/patients" />}>
-              初診患者の記録
+              店舗シート
             </Button>
           )}
-          <Button variant="ghost" size="sm" render={<Link href="/dashboard/report" />}>
-            レポート
-          </Button>
+          {profile.role !== "staff" && (
+            <Button variant="ghost" size="sm" render={<Link href="/dashboard/report" />}>
+              エリア・全社シート
+            </Button>
+          )}
           {profile.role === "admin" && (
             <Button variant="ghost" size="sm" render={<Link href="/dashboard/master/areas" />}>
               マスタ管理

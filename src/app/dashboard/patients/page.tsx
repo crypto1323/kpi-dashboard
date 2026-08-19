@@ -24,12 +24,18 @@ import {
 import { StoreSwitcher } from "@/components/store-switcher";
 import { ConfirmSubmitButton } from "@/components/confirm-submit-button";
 import { createPatient, deletePatient, updatePatient } from "./actions";
+import type { ChannelPerformanceRow } from "@/lib/types";
 
 const CONTRACT_LABEL: Record<string, string> = {
   pending: "保留",
   contracted: "成約",
   declined: "不成約",
 };
+
+function formatPercent(numerator: number, denominator: number) {
+  if (denominator === 0) return "—";
+  return `${((numerator / denominator) * 100).toFixed(1)}%`;
+}
 
 export default async function PatientsPage({
   searchParams,
@@ -41,8 +47,11 @@ export default async function PatientsPage({
     return (
       <Card className="max-w-md">
         <CardContent className="text-sm text-muted-foreground">
-          エリア長アカウントでは初診患者の入力はできません。集計結果はエリア別ビュー（Phase
-          4）でご確認いただけます。
+          エリア長アカウントでは店舗シートは使用できません。集計結果は
+          <Link href="/dashboard/report" className="underline">
+            エリア・全社シート
+          </Link>
+          でご確認いただけます。
         </CardContent>
       </Card>
     );
@@ -78,7 +87,7 @@ export default async function PatientsPage({
     );
   }
 
-  const [{ data: channels }, { data: patients }, { data: store }] =
+  const [{ data: channels }, { data: patients }, { data: store }, { data: performance }] =
     await Promise.all([
       supabase
         .from("channels")
@@ -92,15 +101,22 @@ export default async function PatientsPage({
         .order("visit_date", { ascending: false })
         .limit(50),
       supabase.from("stores").select("code, name").eq("id", storeId).single(),
+      supabase
+        .from("channel_performance_by_store")
+        .select("*")
+        .eq("store_id", storeId),
     ]);
 
   const errorMessage = Array.isArray(error) ? error[0] : error;
+  const performanceRows = ((performance ?? []) as ChannelPerformanceRow[])
+    .filter((row) => row.patient_count > 0)
+    .sort((a, b) => b.patient_count - a.patient_count);
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 pb-12">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-lg font-semibold">初診患者の記録</h1>
+          <h1 className="text-lg font-semibold">店舗シート</h1>
           <p className="text-sm text-muted-foreground">
             {store ? `${store.code} ${store.name}` : ""}
           </p>
@@ -108,6 +124,42 @@ export default async function PatientsPage({
         {profile.role === "admin" && activeStores.length > 0 && (
           <StoreSwitcher stores={activeStores} value={storeId} />
         )}
+      </div>
+
+      <div className="rounded-lg border bg-background">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>流入媒体</TableHead>
+              <TableHead className="text-right">集客数（初診数）</TableHead>
+              <TableHead className="text-right">初診率</TableHead>
+              <TableHead className="text-right">成約率</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {performanceRows.map((row) => (
+              <TableRow key={row.channel_id}>
+                <TableCell className="font-medium">{row.channel_name}</TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {row.patient_count}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {formatPercent(row.second_visit_count, row.patient_count)}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {formatPercent(row.contracted_count, row.patient_count)}
+                </TableCell>
+              </TableRow>
+            ))}
+            {!performanceRows.length && (
+              <TableRow>
+                <TableCell colSpan={4} className="text-center text-muted-foreground">
+                  まだ実績がありません。
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
       </div>
 
       <Card>
@@ -256,13 +308,15 @@ export default async function PatientsPage({
           </TableBody>
         </Table>
       </div>
-      <p className="text-xs text-muted-foreground">
-        媒体ごとの集客数・初診率・成約率・集客費は
-        <Link href="/dashboard/report" className="underline">
-          レポート画面
-        </Link>
-        で確認できます。
-      </p>
+      {profile.role === "admin" && (
+        <p className="text-xs text-muted-foreground">
+          エリア・全社の集計や集客費は
+          <Link href="/dashboard/report" className="underline">
+            エリア・全社シート
+          </Link>
+          で確認できます。
+        </p>
+      )}
     </div>
   );
 }
