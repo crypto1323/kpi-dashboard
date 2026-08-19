@@ -83,3 +83,13 @@ export interface ChannelPerformanceRow {
   contracted_count: number;
   spend_amount: number;
 }
+
+/** Row shape from patient_performance_by_staff — per-staff totals within one store. */
+export interface StaffPerformanceRow {
+  store_id: string;
+  created_by: string | null;
+  staff_name: string;
+  patient_count: number;
+  second_visit_count: number;
+  contracted_count: number;
+}

@@ -10,6 +10,7 @@ import {
   Table,
   TableBody,
   TableCell,
+  TableFooter,
   TableHead,
   TableHeader,
   TableRow,
@@ -24,7 +25,7 @@ import {
 import { StoreSwitcher } from "@/components/store-switcher";
 import { ConfirmSubmitButton } from "@/components/confirm-submit-button";
 import { createPatient, deletePatient, updatePatient } from "./actions";
-import type { ChannelPerformanceRow } from "@/lib/types";
+import type { ChannelPerformanceRow, StaffPerformanceRow } from "@/lib/types";
 
 const CONTRACT_LABEL: Record<string, string> = {
   pending: "保留",
@@ -87,30 +88,50 @@ export default async function PatientsPage({
     );
   }
 
-  const [{ data: channels }, { data: patients }, { data: store }, { data: performance }] =
-    await Promise.all([
-      supabase
-        .from("channels")
-        .select("id, name")
-        .eq("is_active", true)
-        .order("sort_order"),
-      supabase
-        .from("patients")
-        .select("*, channels(name)")
-        .eq("store_id", storeId)
-        .order("visit_date", { ascending: false })
-        .limit(50),
-      supabase.from("stores").select("code, name").eq("id", storeId).single(),
-      supabase
-        .from("channel_performance_by_store")
-        .select("*")
-        .eq("store_id", storeId),
-    ]);
+  const [
+    { data: channels },
+    { data: patients },
+    { data: store },
+    { data: performance },
+    { data: staffPerformance },
+  ] = await Promise.all([
+    supabase
+      .from("channels")
+      .select("id, name")
+      .eq("is_active", true)
+      .order("sort_order"),
+    supabase
+      .from("patients")
+      .select("*, channels(name)")
+      .eq("store_id", storeId)
+      .order("visit_date", { ascending: false })
+      .limit(50),
+    supabase.from("stores").select("code, name").eq("id", storeId).single(),
+    supabase
+      .from("channel_performance_by_store")
+      .select("*")
+      .eq("store_id", storeId),
+    supabase
+      .from("patient_performance_by_staff")
+      .select("*")
+      .eq("store_id", storeId),
+  ]);
 
   const errorMessage = Array.isArray(error) ? error[0] : error;
   const performanceRows = ((performance ?? []) as ChannelPerformanceRow[])
     .filter((row) => row.patient_count > 0)
     .sort((a, b) => b.patient_count - a.patient_count);
+  const storeTotal = performanceRows.reduce(
+    (acc, row) => ({
+      patient_count: acc.patient_count + row.patient_count,
+      second_visit_count: acc.second_visit_count + row.second_visit_count,
+      contracted_count: acc.contracted_count + row.contracted_count,
+    }),
+    { patient_count: 0, second_visit_count: 0, contracted_count: 0 },
+  );
+  const staffRows = ((staffPerformance ?? []) as StaffPerformanceRow[]).sort(
+    (a, b) => b.patient_count - a.patient_count,
+  );
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 pb-12">
@@ -126,6 +147,7 @@ export default async function PatientsPage({
         )}
       </div>
 
+      <h2 className="-mb-2 text-sm font-medium text-muted-foreground">媒体別実績</h2>
       <div className="rounded-lg border bg-background">
         <Table>
           <TableHeader>
@@ -159,8 +181,60 @@ export default async function PatientsPage({
               </TableRow>
             )}
           </TableBody>
+          {performanceRows.length > 0 && (
+            <TableFooter>
+              <TableRow>
+                <TableCell className="font-medium">店舗合計</TableCell>
+                <TableCell className="text-right tabular-nums font-medium">
+                  {storeTotal.patient_count}
+                </TableCell>
+                <TableCell className="text-right tabular-nums font-medium">
+                  {formatPercent(storeTotal.second_visit_count, storeTotal.patient_count)}
+                </TableCell>
+                <TableCell className="text-right tabular-nums font-medium">
+                  {formatPercent(storeTotal.contracted_count, storeTotal.patient_count)}
+                </TableCell>
+              </TableRow>
+            </TableFooter>
+          )}
         </Table>
       </div>
+
+      {staffRows.length > 0 && (
+        <>
+          <h2 className="-mb-2 text-sm font-medium text-muted-foreground">
+            スタッフ別実績
+          </h2>
+          <div className="rounded-lg border bg-background">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>担当スタッフ</TableHead>
+                  <TableHead className="text-right">集客数（初診数）</TableHead>
+                  <TableHead className="text-right">初診率</TableHead>
+                  <TableHead className="text-right">成約率</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {staffRows.map((row) => (
+                  <TableRow key={row.created_by ?? row.staff_name}>
+                    <TableCell className="font-medium">{row.staff_name}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {row.patient_count}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatPercent(row.second_visit_count, row.patient_count)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatPercent(row.contracted_count, row.patient_count)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </>
+      )}
 
       <Card>
         <CardContent>
