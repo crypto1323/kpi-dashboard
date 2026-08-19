@@ -22,7 +22,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { StoreSwitcher } from "@/components/store-switcher";
-import { createPatient, updatePatient } from "./actions";
+import { ConfirmSubmitButton } from "@/components/confirm-submit-button";
+import { createPatient, deletePatient, updatePatient } from "./actions";
 
 const CONTRACT_LABEL: Record<string, string> = {
   pending: "保留",
@@ -117,6 +118,10 @@ export default async function PatientsPage({
               <input type="hidden" name="storeId" value={storeId} />
             )}
             <div className="flex flex-col gap-2">
+              <Label htmlFor="patientName">患者名</Label>
+              <Input id="patientName" name="patientName" required className="w-36" />
+            </div>
+            <div className="flex flex-col gap-2">
               <Label htmlFor="channelId">流入媒体</Label>
               <Select name="channelId">
                 <SelectTrigger id="channelId" className="w-48">
@@ -160,18 +165,25 @@ export default async function PatientsPage({
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead>患者名</TableHead>
               <TableHead>初診日</TableHead>
               <TableHead>流入媒体</TableHead>
-              <TableHead>2回目来院日</TableHead>
+              <TableHead>2回目来院</TableHead>
               <TableHead>成約状況</TableHead>
-              <TableHead className="text-right">更新</TableHead>
+              <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {patients?.map((patient) => {
               const updatePatientWithId = updatePatient.bind(null, patient.id);
+              const deletePatientWithId = deletePatient.bind(null, patient.id);
+              const hasSecondVisit = Boolean(patient.second_visit_date);
+              const isContracted = patient.contract_status === "contracted";
               return (
                 <TableRow key={patient.id}>
+                  <TableCell className="whitespace-nowrap font-medium">
+                    {patient.patient_name}
+                  </TableCell>
                   <TableCell className="whitespace-nowrap">
                     {patient.visit_date}
                   </TableCell>
@@ -184,39 +196,48 @@ export default async function PatientsPage({
                       className="flex flex-wrap items-center gap-2"
                     >
                       <input type="hidden" name="storeId" value={storeId} />
-                      <Input
-                        type="date"
-                        name="secondVisitDate"
-                        defaultValue={patient.second_visit_date ?? ""}
-                        className="w-40"
-                      />
-                      <Select
-                        name="contractStatus"
-                        defaultValue={patient.contract_status}
-                      >
-                        <SelectTrigger className="w-28">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {Object.entries(CONTRACT_LABEL).map(([value, label]) => (
-                            <SelectItem key={value} value={value}>
-                              {label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <Badge
-                        variant={
-                          patient.contract_status === "contracted"
-                            ? "secondary"
-                            : "outline"
-                        }
-                      >
-                        {CONTRACT_LABEL[patient.contract_status]}
-                      </Badge>
+                      <div className="flex items-center gap-1.5">
+                        <Badge variant={hasSecondVisit ? "secondary" : "outline"}>
+                          {hasSecondVisit ? "来院済み" : "未来院"}
+                        </Badge>
+                        <Input
+                          type="date"
+                          name="secondVisitDate"
+                          defaultValue={patient.second_visit_date ?? ""}
+                          className="w-40"
+                        />
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <Badge variant={isContracted ? "secondary" : "outline"}>
+                          {isContracted ? "成約" : "未成約"}
+                        </Badge>
+                        <Select
+                          name="contractStatus"
+                          defaultValue={patient.contract_status}
+                        >
+                          <SelectTrigger className="w-28">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {Object.entries(CONTRACT_LABEL).map(([value, label]) => (
+                              <SelectItem key={value} value={value}>
+                                {label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
                       <Button type="submit" size="sm" variant="outline">
                         更新
                       </Button>
+                      <ConfirmSubmitButton
+                        formAction={deletePatientWithId}
+                        confirmMessage={`「${patient.patient_name}」の記録を削除しますか？この操作は取り消せません。`}
+                        size="sm"
+                        variant="destructive"
+                      >
+                        削除
+                      </ConfirmSubmitButton>
                     </form>
                   </TableCell>
                 </TableRow>
@@ -225,7 +246,7 @@ export default async function PatientsPage({
             {!patients?.length && (
               <TableRow>
                 <TableCell
-                  colSpan={5}
+                  colSpan={6}
                   className="text-center text-muted-foreground"
                 >
                   この店舗の初診患者はまだ登録されていません。

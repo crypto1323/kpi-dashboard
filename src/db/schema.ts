@@ -116,6 +116,7 @@ export const patients = pgTable(
     channelId: uuid("channel_id")
       .notNull()
       .references(() => channels.id, { onDelete: "restrict" }),
+    patientName: text("patient_name").notNull(),
     visitDate: date("visit_date").notNull(),
     secondVisitDate: date("second_visit_date"),
     contractStatus: contractStatusEnum("contract_status")
@@ -136,6 +137,36 @@ export const patients = pgTable(
     index("patients_store_id_idx").on(table.storeId),
     index("patients_channel_id_idx").on(table.channelId),
     index("patients_visit_date_idx").on(table.visitDate),
+  ],
+);
+
+export const channelSpends = pgTable(
+  "channel_spends",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    storeId: uuid("store_id")
+      .notNull()
+      .references(() => stores.id, { onDelete: "restrict" }),
+    channelId: uuid("channel_id")
+      .notNull()
+      .references(() => channels.id, { onDelete: "restrict" }),
+    period: date("period").notNull(),
+    amount: integer("amount").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (table) => [
+    uniqueIndex("channel_spends_store_channel_period_key").on(
+      table.storeId,
+      table.channelId,
+      table.period,
+    ),
+    index("channel_spends_store_id_idx").on(table.storeId),
+    index("channel_spends_channel_id_idx").on(table.channelId),
   ],
 );
 

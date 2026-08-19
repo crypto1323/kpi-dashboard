@@ -53,6 +53,7 @@ export interface Patient {
   id: string;
   store_id: string;
   channel_id: string;
+  patient_name: string;
   visit_date: string;
   second_visit_date: string | null;
   contract_status: ContractStatus;
@@ -60,4 +61,26 @@ export interface Patient {
   created_by: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ChannelSpend {
+  id: string;
+  store_id: string;
+  channel_id: string;
+  period: string;
+  amount: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Row shape shared by the channel_performance_by_* views (some columns absent depending on grain). */
+export interface ChannelPerformanceRow {
+  store_id?: string;
+  area_id?: string | null;
+  channel_id: string;
+  channel_name: string;
+  patient_count: number;
+  second_visit_count: number;
+  contracted_count: number;
+  spend_amount: number;
 }

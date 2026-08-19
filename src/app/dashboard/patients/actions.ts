@@ -19,11 +19,12 @@ export async function createPatient(formData: FormData) {
       ? String(formData.get("storeId") ?? "")
       : profile.store_id;
   const channelId = String(formData.get("channelId") ?? "");
+  const patientName = String(formData.get("patientName") ?? "").trim();
   const visitDate = String(formData.get("visitDate") ?? "");
 
-  if (!storeId || !channelId || !visitDate) {
+  if (!storeId || !channelId || !patientName || !visitDate) {
     redirect(
-      `/dashboard/patients?error=${encodeURIComponent("流入媒体と初診日を入力してください。")}&storeId=${storeId ?? ""}`,
+      `/dashboard/patients?error=${encodeURIComponent("患者名・流入媒体・初診日を入力してください。")}&storeId=${storeId ?? ""}`,
     );
   }
 
@@ -31,6 +32,7 @@ export async function createPatient(formData: FormData) {
   const { error } = await supabase.from("patients").insert({
     store_id: storeId,
     channel_id: channelId,
+    patient_name: patientName,
     visit_date: visitDate,
     created_by: profile.id,
   });
@@ -79,6 +81,23 @@ export async function updatePatient(id: string, formData: FormData) {
       contracted_date: contractedDate,
     })
     .eq("id", id);
+
+  if (error) {
+    redirect(
+      `/dashboard/patients?error=${encodeURIComponent(error.message)}&storeId=${storeId}`,
+    );
+  }
+
+  revalidatePath("/dashboard/patients");
+  redirect(`/dashboard/patients?storeId=${storeId}`);
+}
+
+export async function deletePatient(id: string, formData: FormData) {
+  await getCurrentProfile();
+  const storeId = String(formData.get("storeId") ?? "");
+
+  const supabase = await createClient();
+  const { error } = await supabase.from("patients").delete().eq("id", id);
 
   if (error) {
     redirect(
