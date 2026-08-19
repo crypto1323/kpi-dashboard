@@ -67,7 +67,6 @@ export interface ChannelSpend {
   id: string;
   store_id: string;
   channel_id: string;
-  period: string;
   amount: number;
   created_at: string;
   updated_at: string;

@@ -32,11 +32,6 @@ export default async function DashboardLayout({
               初診患者の記録
             </Button>
           )}
-          {profile.role !== "area_manager" && (
-            <Button variant="ghost" size="sm" render={<Link href="/dashboard/spend" />}>
-              媒体費用
-            </Button>
-          )}
           <Button variant="ghost" size="sm" render={<Link href="/dashboard/report" />}>
             レポート
           </Button>

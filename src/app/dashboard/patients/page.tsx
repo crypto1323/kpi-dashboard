@@ -257,11 +257,11 @@ export default async function PatientsPage({
         </Table>
       </div>
       <p className="text-xs text-muted-foreground">
-        店舗別・エリア別・全社のグラフ集計は
-        <Link href="/dashboard" className="underline">
-          Phase 3以降
+        媒体ごとの集客数・初診率・成約率・集客費は
+        <Link href="/dashboard/report" className="underline">
+          レポート画面
         </Link>
-        で追加されます。
+        で確認できます。
       </p>
     </div>
   );

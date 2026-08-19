@@ -12,8 +12,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Input } from "@/components/ui/input";
 import { StoreSwitcher } from "@/components/store-switcher";
 import { AreaSwitcher } from "@/components/area-switcher";
+import { upsertChannelSpend } from "./actions";
 import type { ChannelPerformanceRow } from "@/lib/types";
 
 function formatPercent(numerator: number, denominator: number) {
@@ -31,11 +33,13 @@ export default async function ReportPage({
 }: PageProps<"/dashboard/report">) {
   const profile = await getCurrentProfile();
   const params = await searchParams;
+  const errorMessage = Array.isArray(params.error) ? params.error[0] : params.error;
   const supabase = await createClient();
 
   let level: "store" | "area" | "company";
   let heading = "";
   let rows: ChannelPerformanceRow[] = [];
+  let editableStoreId: string | null = null;
   let storeSwitcherProps: { stores: { id: string; code: string; name: string }[]; value: string } | null = null;
   let areaSwitcherProps: { areas: { id: string; name: string }[]; value: string } | null = null;
 
@@ -99,6 +103,7 @@ export default async function ReportPage({
         ]);
         heading = store ? `${store.code} ${store.name}` : "";
         rows = data ?? [];
+        editableStoreId = storeId;
         storeSwitcherProps = { stores: stores ?? [], value: storeId };
       }
     } else if (level === "area") {
@@ -171,6 +176,8 @@ export default async function ReportPage({
         </div>
       </div>
 
+      {errorMessage && <p className="text-sm text-destructive">{errorMessage}</p>}
+
       <div className="rounded-lg border bg-background">
         <Table>
           <TableHeader>
@@ -179,7 +186,9 @@ export default async function ReportPage({
               <TableHead className="text-right">集客数（初診数）</TableHead>
               <TableHead className="text-right">初診率</TableHead>
               <TableHead className="text-right">成約率</TableHead>
-              <TableHead className="text-right">媒体費用</TableHead>
+              <TableHead className="text-right">
+                媒体費用{editableStoreId && profile.role === "admin" && "（年間契約額）"}
+              </TableHead>
               <TableHead className="text-right">集客費（1人あたり）</TableHead>
             </TableRow>
           </TableHeader>
@@ -197,7 +206,31 @@ export default async function ReportPage({
                   {formatPercent(row.contracted_count, row.patient_count)}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">
-                  ¥{row.spend_amount.toLocaleString()}
+                  {editableStoreId && profile.role === "admin" ? (
+                    <form
+                      action={upsertChannelSpend.bind(
+                        null,
+                        editableStoreId,
+                        row.channel_id,
+                      )}
+                      className="flex items-center justify-end gap-1.5"
+                    >
+                      <span>¥</span>
+                      <Input
+                        type="number"
+                        name="amount"
+                        min={0}
+                        step={1000}
+                        defaultValue={row.spend_amount}
+                        className="w-28 text-right"
+                      />
+                      <Button type="submit" size="sm" variant="outline">
+                        保存
+                      </Button>
+                    </form>
+                  ) : (
+                    `¥${row.spend_amount.toLocaleString()}`
+                  )}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">
                   {formatCpa(row.spend_amount, row.patient_count)}
