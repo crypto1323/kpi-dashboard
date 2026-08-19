@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { getCurrentProfile } from "@/lib/dal";
 import { logout } from "@/app/login/actions";
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,16 @@ export default async function DashboardLayout({
           </Badge>
         </div>
         <div className="flex items-center gap-3">
+          {profile.role !== "area_manager" && (
+            <Button variant="ghost" size="sm" render={<Link href="/dashboard/patients" />}>
+              初診患者の記録
+            </Button>
+          )}
+          {profile.role === "admin" && (
+            <Button variant="ghost" size="sm" render={<Link href="/dashboard/master/areas" />}>
+              マスタ管理
+            </Button>
+          )}
           <span className="text-sm text-muted-foreground">
             {profile.display_name}
           </span>

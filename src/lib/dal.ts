@@ -33,3 +33,12 @@ export const getCurrentProfile = cache(async (): Promise<Profile> => {
 
   return profile;
 });
+
+/** Guards admin-only pages/actions. RLS enforces this independently at the DB level. */
+export async function requireAdmin(): Promise<Profile> {
+  const profile = await getCurrentProfile();
+  if (profile.role !== "admin") {
+    redirect("/dashboard");
+  }
+  return profile;
+}
