@@ -214,7 +214,7 @@ export default async function PatientsPage({
       .order("sort_order"),
     supabase
       .from("patients")
-      .select("*, channels(name), profiles(display_name)")
+      .select("*, channels(name)")
       .eq("store_id", storeId)
       .order("visit_date", { ascending: false })
       .limit(50),
@@ -288,6 +288,15 @@ export default async function PatientsPage({
                     name="patientName"
                     required
                     className="w-36"
+                  />
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="assigneeName">担当者</Label>
+                  <Input
+                    id="assigneeName"
+                    name="assigneeName"
+                    required
+                    className="w-32"
                   />
                 </div>
                 <div className="flex flex-col gap-2">
@@ -379,7 +388,7 @@ export default async function PatientsPage({
                         {GENDER_LABEL[patient.gender as PatientGender]}
                       </TableCell>
                       <TableCell className="whitespace-nowrap">
-                        {patient.profiles?.display_name ?? "—"}
+                        {patient.assignee_name || "—"}
                       </TableCell>
                       <TableCell className="whitespace-nowrap">
                         {patient.channels?.name ?? "—"}

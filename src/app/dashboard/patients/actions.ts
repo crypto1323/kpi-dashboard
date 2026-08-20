@@ -21,15 +21,16 @@ export async function createPatient(formData: FormData) {
       : profile.store_id;
   const channelId = String(formData.get("channelId") ?? "");
   const patientName = String(formData.get("patientName") ?? "").trim();
+  const assigneeName = String(formData.get("assigneeName") ?? "").trim();
   const genderRaw = String(formData.get("gender") ?? "");
   const gender = GENDERS.includes(genderRaw as PatientGender)
     ? (genderRaw as PatientGender)
     : null;
   const visitDate = String(formData.get("visitDate") ?? "");
 
-  if (!storeId || !channelId || !patientName || !gender || !visitDate) {
+  if (!storeId || !channelId || !patientName || !assigneeName || !gender || !visitDate) {
     redirect(
-      `/dashboard/patients?error=${encodeURIComponent("患者名・性別・流入媒体・初診日を入力してください。")}&storeId=${storeId ?? ""}`,
+      `/dashboard/patients?error=${encodeURIComponent("患者名・担当者・性別・流入媒体・初診日を入力してください。")}&storeId=${storeId ?? ""}`,
     );
   }
 
@@ -38,6 +39,7 @@ export async function createPatient(formData: FormData) {
     store_id: storeId,
     channel_id: channelId,
     patient_name: patientName,
+    assignee_name: assigneeName,
     gender,
     visit_date: visitDate,
     created_by: profile.id,

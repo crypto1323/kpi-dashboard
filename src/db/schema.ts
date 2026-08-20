@@ -130,6 +130,7 @@ export const patients = pgTable(
       .notNull()
       .default("pending"),
     contractedDate: date("contracted_date"),
+    assigneeName: text("assignee_name").notNull().default(""),
     createdBy: uuid("created_by").references(() => profiles.id, {
       onDelete: "set null",
     }),

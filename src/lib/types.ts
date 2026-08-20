@@ -60,6 +60,7 @@ export interface Patient {
   second_visit_date: string | null;
   contract_status: ContractStatus;
   contracted_date: string | null;
+  assignee_name: string;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -86,10 +87,9 @@ export interface ChannelPerformanceRow {
   spend_amount: number;
 }
 
-/** Row shape from patient_performance_by_staff — per-staff totals within one store. */
+/** Row shape from patient_performance_by_staff — per-staff (assignee_name) totals within one store. */
 export interface StaffPerformanceRow {
   store_id: string;
-  created_by: string | null;
   staff_name: string;
   patient_count: number;
   second_visit_count: number;
@@ -99,7 +99,6 @@ export interface StaffPerformanceRow {
 /** Row shape from patient_performance_by_staff_channel. */
 export interface StaffChannelPerformanceRow {
   store_id: string;
-  created_by: string | null;
   staff_name: string;
   channel_id: string;
   channel_name: string;
@@ -111,7 +110,6 @@ export interface StaffChannelPerformanceRow {
 /** Row shape from patient_performance_by_staff_gender. */
 export interface StaffGenderPerformanceRow {
   store_id: string;
-  created_by: string | null;
   staff_name: string;
   gender: PatientGender;
   patient_count: number;
