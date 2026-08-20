@@ -25,6 +25,10 @@ import {
 } from "@/components/ui/select";
 import { StoreSwitcher } from "@/components/store-switcher";
 import { ConfirmSubmitButton } from "@/components/confirm-submit-button";
+import { RateBarChart } from "@/components/charts/RateBarChart";
+import { StaffCrossChart } from "@/components/charts/StaffCrossChart";
+import { StatTile } from "@/components/charts/StatTile";
+import { Meter } from "@/components/charts/Meter";
 import { createPatient, deletePatient, updatePatient } from "./actions";
 import type {
   ChannelPerformanceRow,
@@ -47,9 +51,13 @@ const GENDER_LABEL: Record<PatientGender, string> = {
   other: "その他",
 };
 
+function rate(numerator: number, denominator: number) {
+  return denominator === 0 ? 0 : (numerator / denominator) * 100;
+}
+
 function formatPercent(numerator: number, denominator: number) {
   if (denominator === 0) return "—";
-  return `${((numerator / denominator) * 100).toFixed(1)}%`;
+  return `${rate(numerator, denominator).toFixed(1)}%`;
 }
 
 type MetricRow = {
@@ -249,6 +257,21 @@ export default async function PatientsPage({
   const genderRows = ((genderPerf ?? []) as GenderPerformanceRow[]).sort(
     (a, b) => b.patient_count - a.patient_count,
   );
+  const storeTotal = channelRows.reduce(
+    (acc, row) => ({
+      patient_count: acc.patient_count + row.patient_count,
+      second_visit_count: acc.second_visit_count + row.second_visit_count,
+      contracted_count: acc.contracted_count + row.contracted_count,
+    }),
+    { patient_count: 0, second_visit_count: 0, contracted_count: 0 },
+  );
+  function toChartData<T extends MetricRow>(rows: T[], label: (row: T) => string) {
+    return rows.map((row) => ({
+      label: label(row),
+      初診率: Number(rate(row.second_visit_count, row.patient_count).toFixed(1)),
+      成約率: Number(rate(row.contracted_count, row.patient_count).toFixed(1)),
+    }));
+  }
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 pb-12">
@@ -472,65 +495,104 @@ export default async function PatientsPage({
           </div>
         </TabsContent>
 
-        <TabsContent value="analysis" className="flex flex-col gap-6 pt-4">
+        <TabsContent value="analysis" className="flex flex-col gap-8 pt-4">
+          <Card>
+            <CardContent>
+              <h2 className="mb-3 text-sm font-medium">店舗全体サマリー</h2>
+              <div className="mb-4 grid grid-cols-3 gap-3">
+                <StatTile label="集客数（初診数）" value={`${storeTotal.patient_count}人`} />
+                <StatTile
+                  label="初診率"
+                  value={formatPercent(storeTotal.second_visit_count, storeTotal.patient_count)}
+                />
+                <StatTile
+                  label="成約率"
+                  value={formatPercent(storeTotal.contracted_count, storeTotal.patient_count)}
+                />
+              </div>
+              <div className="max-w-xs">
+                <Meter
+                  label="成約率"
+                  value={rate(storeTotal.contracted_count, storeTotal.patient_count)}
+                />
+              </div>
+            </CardContent>
+          </Card>
+
           <div>
             <h2 className="mb-2 text-sm font-medium text-muted-foreground">
               担当者別（初診率＝2回目来院した割合）
             </h2>
-            <AnalysisTable
-              rows={staffRows}
-              labelHeaders={["担当者"]}
-              getLabels={(row) => [row.staff_name]}
-              emptyMessage="まだ実績がありません。"
-            />
+            <div className="grid gap-6 lg:grid-cols-2">
+              <AnalysisTable
+                rows={staffRows}
+                labelHeaders={["担当者"]}
+                getLabels={(row) => [row.staff_name]}
+                emptyMessage="まだ実績がありません。"
+              />
+              <RateBarChart data={toChartData(staffRows, (row) => row.staff_name)} />
+            </div>
           </div>
 
           <div>
             <h2 className="mb-2 text-sm font-medium text-muted-foreground">
-              担当者別 × 流入媒体別
+              担当者別 × 流入媒体別・性別（担当者を選んで比較）
             </h2>
-            <AnalysisTable
-              rows={staffChannelRows}
-              labelHeaders={["担当者", "流入媒体"]}
-              getLabels={(row) => [row.staff_name, row.channel_name]}
-              emptyMessage="まだ実績がありません。"
+            <StaffCrossChart
+              staffChannelRows={staffChannelRows}
+              staffGenderRows={staffGenderRows}
             />
-          </div>
-
-          <div>
-            <h2 className="mb-2 text-sm font-medium text-muted-foreground">
-              担当者別 × 性別
-            </h2>
-            <AnalysisTable
-              rows={staffGenderRows}
-              labelHeaders={["担当者", "性別"]}
-              getLabels={(row) => [row.staff_name, GENDER_LABEL[row.gender]]}
-              emptyMessage="まだ実績がありません。"
-            />
+            <details className="mt-4">
+              <summary className="cursor-pointer text-xs text-muted-foreground select-none">
+                全担当者ぶんの数値表を見る
+              </summary>
+              <div className="mt-3 flex flex-col gap-6">
+                <AnalysisTable
+                  rows={staffChannelRows}
+                  labelHeaders={["担当者", "流入媒体"]}
+                  getLabels={(row) => [row.staff_name, row.channel_name]}
+                  emptyMessage="まだ実績がありません。"
+                />
+                <AnalysisTable
+                  rows={staffGenderRows}
+                  labelHeaders={["担当者", "性別"]}
+                  getLabels={(row) => [row.staff_name, GENDER_LABEL[row.gender]]}
+                  emptyMessage="まだ実績がありません。"
+                />
+              </div>
+            </details>
           </div>
 
           <div>
             <h2 className="mb-2 text-sm font-medium text-muted-foreground">
               店舗全体 × 流入媒体別（合計行が店舗全体の初診率・成約率）
             </h2>
-            <AnalysisTable
-              rows={channelRows}
-              labelHeaders={["流入媒体"]}
-              getLabels={(row) => [row.channel_name]}
-              emptyMessage="まだ実績がありません。"
-            />
+            <div className="grid gap-6 lg:grid-cols-2">
+              <AnalysisTable
+                rows={channelRows}
+                labelHeaders={["流入媒体"]}
+                getLabels={(row) => [row.channel_name]}
+                emptyMessage="まだ実績がありません。"
+              />
+              <RateBarChart data={toChartData(channelRows, (row) => row.channel_name)} />
+            </div>
           </div>
 
           <div>
             <h2 className="mb-2 text-sm font-medium text-muted-foreground">
               店舗全体 × 性別
             </h2>
-            <AnalysisTable
-              rows={genderRows}
-              labelHeaders={["性別"]}
-              getLabels={(row) => [GENDER_LABEL[row.gender]]}
-              emptyMessage="まだ実績がありません。"
-            />
+            <div className="grid gap-6 lg:grid-cols-2">
+              <AnalysisTable
+                rows={genderRows}
+                labelHeaders={["性別"]}
+                getLabels={(row) => [GENDER_LABEL[row.gender]]}
+                emptyMessage="まだ実績がありません。"
+              />
+              <RateBarChart
+                data={toChartData(genderRows, (row) => GENDER_LABEL[row.gender])}
+              />
+            </div>
           </div>
         </TabsContent>
       </Tabs>
