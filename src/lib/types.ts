@@ -9,6 +9,7 @@
 
 export type ProfileRole = "staff" | "area_manager" | "admin";
 export type ContractStatus = "pending" | "contracted" | "declined";
+export type PatientGender = "male" | "female" | "other";
 
 export interface Area {
   id: string;
@@ -54,6 +55,7 @@ export interface Patient {
   store_id: string;
   channel_id: string;
   patient_name: string;
+  gender: PatientGender;
   visit_date: string;
   second_visit_date: string | null;
   contract_status: ContractStatus;
@@ -89,6 +91,38 @@ export interface StaffPerformanceRow {
   store_id: string;
   created_by: string | null;
   staff_name: string;
+  patient_count: number;
+  second_visit_count: number;
+  contracted_count: number;
+}
+
+/** Row shape from patient_performance_by_staff_channel. */
+export interface StaffChannelPerformanceRow {
+  store_id: string;
+  created_by: string | null;
+  staff_name: string;
+  channel_id: string;
+  channel_name: string;
+  patient_count: number;
+  second_visit_count: number;
+  contracted_count: number;
+}
+
+/** Row shape from patient_performance_by_staff_gender. */
+export interface StaffGenderPerformanceRow {
+  store_id: string;
+  created_by: string | null;
+  staff_name: string;
+  gender: PatientGender;
+  patient_count: number;
+  second_visit_count: number;
+  contracted_count: number;
+}
+
+/** Row shape from patient_performance_by_gender (store-level). */
+export interface GenderPerformanceRow {
+  store_id: string;
+  gender: PatientGender;
   patient_count: number;
   second_visit_count: number;
   contracted_count: number;

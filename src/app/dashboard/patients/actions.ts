@@ -4,9 +4,10 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getCurrentProfile } from "@/lib/dal";
-import type { ContractStatus } from "@/lib/types";
+import type { ContractStatus, PatientGender } from "@/lib/types";
 
 const CONTRACT_STATUSES: ContractStatus[] = ["pending", "contracted", "declined"];
+const GENDERS: PatientGender[] = ["male", "female", "other"];
 
 export async function createPatient(formData: FormData) {
   const profile = await getCurrentProfile();
@@ -20,11 +21,15 @@ export async function createPatient(formData: FormData) {
       : profile.store_id;
   const channelId = String(formData.get("channelId") ?? "");
   const patientName = String(formData.get("patientName") ?? "").trim();
+  const genderRaw = String(formData.get("gender") ?? "");
+  const gender = GENDERS.includes(genderRaw as PatientGender)
+    ? (genderRaw as PatientGender)
+    : null;
   const visitDate = String(formData.get("visitDate") ?? "");
 
-  if (!storeId || !channelId || !patientName || !visitDate) {
+  if (!storeId || !channelId || !patientName || !gender || !visitDate) {
     redirect(
-      `/dashboard/patients?error=${encodeURIComponent("患者名・流入媒体・初診日を入力してください。")}&storeId=${storeId ?? ""}`,
+      `/dashboard/patients?error=${encodeURIComponent("患者名・性別・流入媒体・初診日を入力してください。")}&storeId=${storeId ?? ""}`,
     );
   }
 
@@ -33,6 +38,7 @@ export async function createPatient(formData: FormData) {
     store_id: storeId,
     channel_id: channelId,
     patient_name: patientName,
+    gender,
     visit_date: visitDate,
     created_by: profile.id,
   });

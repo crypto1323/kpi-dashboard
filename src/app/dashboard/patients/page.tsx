@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table,
   TableBody,
@@ -25,7 +26,14 @@ import {
 import { StoreSwitcher } from "@/components/store-switcher";
 import { ConfirmSubmitButton } from "@/components/confirm-submit-button";
 import { createPatient, deletePatient, updatePatient } from "./actions";
-import type { ChannelPerformanceRow, StaffPerformanceRow } from "@/lib/types";
+import type {
+  ChannelPerformanceRow,
+  GenderPerformanceRow,
+  PatientGender,
+  StaffChannelPerformanceRow,
+  StaffGenderPerformanceRow,
+  StaffPerformanceRow,
+} from "@/lib/types";
 
 const CONTRACT_LABEL: Record<string, string> = {
   pending: "保留",
@@ -33,9 +41,110 @@ const CONTRACT_LABEL: Record<string, string> = {
   declined: "不成約",
 };
 
+const GENDER_LABEL: Record<PatientGender, string> = {
+  male: "男性",
+  female: "女性",
+  other: "その他",
+};
+
 function formatPercent(numerator: number, denominator: number) {
   if (denominator === 0) return "—";
   return `${((numerator / denominator) * 100).toFixed(1)}%`;
+}
+
+type MetricRow = {
+  patient_count: number;
+  second_visit_count: number;
+  contracted_count: number;
+};
+
+function AnalysisTable<T extends MetricRow>({
+  rows,
+  labelHeaders,
+  getLabels,
+  emptyMessage,
+}: {
+  rows: T[];
+  labelHeaders: string[];
+  getLabels: (row: T) => string[];
+  emptyMessage: string;
+}) {
+  const total = rows.reduce(
+    (acc, row) => ({
+      patient_count: acc.patient_count + row.patient_count,
+      second_visit_count: acc.second_visit_count + row.second_visit_count,
+      contracted_count: acc.contracted_count + row.contracted_count,
+    }),
+    { patient_count: 0, second_visit_count: 0, contracted_count: 0 },
+  );
+
+  return (
+    <div className="rounded-lg border bg-background">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            {labelHeaders.map((header) => (
+              <TableHead key={header}>{header}</TableHead>
+            ))}
+            <TableHead className="text-right">集客数（初診数）</TableHead>
+            <TableHead className="text-right">初診率</TableHead>
+            <TableHead className="text-right">成約率</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row, index) => (
+            <TableRow key={index}>
+              {getLabels(row).map((label, labelIndex) => (
+                <TableCell
+                  key={labelIndex}
+                  className={labelIndex === 0 ? "font-medium" : "text-muted-foreground"}
+                >
+                  {label}
+                </TableCell>
+              ))}
+              <TableCell className="text-right tabular-nums">
+                {row.patient_count}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">
+                {formatPercent(row.second_visit_count, row.patient_count)}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">
+                {formatPercent(row.contracted_count, row.patient_count)}
+              </TableCell>
+            </TableRow>
+          ))}
+          {!rows.length && (
+            <TableRow>
+              <TableCell
+                colSpan={labelHeaders.length + 3}
+                className="text-center text-muted-foreground"
+              >
+                {emptyMessage}
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+        {rows.length > 0 && (
+          <TableFooter>
+            <TableRow>
+              <TableCell colSpan={labelHeaders.length} className="font-medium">
+                合計
+              </TableCell>
+              <TableCell className="text-right tabular-nums font-medium">
+                {total.patient_count}
+              </TableCell>
+              <TableCell className="text-right tabular-nums font-medium">
+                {formatPercent(total.second_visit_count, total.patient_count)}
+              </TableCell>
+              <TableCell className="text-right tabular-nums font-medium">
+                {formatPercent(total.contracted_count, total.patient_count)}
+              </TableCell>
+            </TableRow>
+          </TableFooter>
+        )}
+      </Table>
+    </div>
+  );
 }
 
 export default async function PatientsPage({
@@ -92,8 +201,11 @@ export default async function PatientsPage({
     { data: channels },
     { data: patients },
     { data: store },
-    { data: performance },
-    { data: staffPerformance },
+    { data: channelPerf },
+    { data: staffPerf },
+    { data: staffChannelPerf },
+    { data: staffGenderPerf },
+    { data: genderPerf },
   ] = await Promise.all([
     supabase
       .from("channels")
@@ -102,34 +214,39 @@ export default async function PatientsPage({
       .order("sort_order"),
     supabase
       .from("patients")
-      .select("*, channels(name)")
+      .select("*, channels(name), profiles(display_name)")
       .eq("store_id", storeId)
       .order("visit_date", { ascending: false })
       .limit(50),
     supabase.from("stores").select("code, name").eq("id", storeId).single(),
+    supabase.from("channel_performance_by_store").select("*").eq("store_id", storeId),
+    supabase.from("patient_performance_by_staff").select("*").eq("store_id", storeId),
     supabase
-      .from("channel_performance_by_store")
+      .from("patient_performance_by_staff_channel")
       .select("*")
       .eq("store_id", storeId),
     supabase
-      .from("patient_performance_by_staff")
+      .from("patient_performance_by_staff_gender")
       .select("*")
       .eq("store_id", storeId),
+    supabase.from("patient_performance_by_gender").select("*").eq("store_id", storeId),
   ]);
 
   const errorMessage = Array.isArray(error) ? error[0] : error;
-  const performanceRows = ((performance ?? []) as ChannelPerformanceRow[])
+
+  const channelRows = ((channelPerf ?? []) as ChannelPerformanceRow[])
     .filter((row) => row.patient_count > 0)
     .sort((a, b) => b.patient_count - a.patient_count);
-  const storeTotal = performanceRows.reduce(
-    (acc, row) => ({
-      patient_count: acc.patient_count + row.patient_count,
-      second_visit_count: acc.second_visit_count + row.second_visit_count,
-      contracted_count: acc.contracted_count + row.contracted_count,
-    }),
-    { patient_count: 0, second_visit_count: 0, contracted_count: 0 },
+  const staffRows = ((staffPerf ?? []) as StaffPerformanceRow[]).sort(
+    (a, b) => b.patient_count - a.patient_count,
   );
-  const staffRows = ((staffPerformance ?? []) as StaffPerformanceRow[]).sort(
+  const staffChannelRows = ((staffChannelPerf ?? []) as StaffChannelPerformanceRow[]).sort(
+    (a, b) => a.staff_name.localeCompare(b.staff_name) || b.patient_count - a.patient_count,
+  );
+  const staffGenderRows = ((staffGenderPerf ?? []) as StaffGenderPerformanceRow[]).sort(
+    (a, b) => a.staff_name.localeCompare(b.staff_name),
+  );
+  const genderRows = ((genderPerf ?? []) as GenderPerformanceRow[]).sort(
     (a, b) => b.patient_count - a.patient_count,
   );
 
@@ -147,241 +264,262 @@ export default async function PatientsPage({
         )}
       </div>
 
-      <h2 className="-mb-2 text-sm font-medium text-muted-foreground">媒体別実績</h2>
-      <div className="rounded-lg border bg-background">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>流入媒体</TableHead>
-              <TableHead className="text-right">集客数（初診数）</TableHead>
-              <TableHead className="text-right">初診率</TableHead>
-              <TableHead className="text-right">成約率</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {performanceRows.map((row) => (
-              <TableRow key={row.channel_id}>
-                <TableCell className="font-medium">{row.channel_name}</TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {row.patient_count}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {formatPercent(row.second_visit_count, row.patient_count)}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {formatPercent(row.contracted_count, row.patient_count)}
-                </TableCell>
-              </TableRow>
-            ))}
-            {!performanceRows.length && (
-              <TableRow>
-                <TableCell colSpan={4} className="text-center text-muted-foreground">
-                  まだ実績がありません。
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-          {performanceRows.length > 0 && (
-            <TableFooter>
-              <TableRow>
-                <TableCell className="font-medium">店舗合計</TableCell>
-                <TableCell className="text-right tabular-nums font-medium">
-                  {storeTotal.patient_count}
-                </TableCell>
-                <TableCell className="text-right tabular-nums font-medium">
-                  {formatPercent(storeTotal.second_visit_count, storeTotal.patient_count)}
-                </TableCell>
-                <TableCell className="text-right tabular-nums font-medium">
-                  {formatPercent(storeTotal.contracted_count, storeTotal.patient_count)}
-                </TableCell>
-              </TableRow>
-            </TableFooter>
-          )}
-        </Table>
-      </div>
+      <Tabs defaultValue="entry">
+        <TabsList>
+          <TabsTrigger value="entry">登録</TabsTrigger>
+          <TabsTrigger value="analysis">分析</TabsTrigger>
+        </TabsList>
 
-      {staffRows.length > 0 && (
-        <>
-          <h2 className="-mb-2 text-sm font-medium text-muted-foreground">
-            スタッフ別実績
-          </h2>
+        <TabsContent value="entry" className="flex flex-col gap-6 pt-4">
+          <Card>
+            <CardContent>
+              <h2 className="mb-3 text-sm font-medium">新規登録</h2>
+              <form
+                action={createPatient}
+                className="flex flex-wrap items-end gap-3"
+              >
+                {profile.role === "admin" && (
+                  <input type="hidden" name="storeId" value={storeId} />
+                )}
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="patientName">患者名</Label>
+                  <Input
+                    id="patientName"
+                    name="patientName"
+                    required
+                    className="w-36"
+                  />
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="gender">性別</Label>
+                  <Select name="gender">
+                    <SelectTrigger id="gender" className="w-28">
+                      <SelectValue placeholder="選択" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(Object.entries(GENDER_LABEL) as [PatientGender, string][]).map(
+                        ([value, label]) => (
+                          <SelectItem key={value} value={value}>
+                            {label}
+                          </SelectItem>
+                        ),
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="channelId">流入媒体</Label>
+                  <Select name="channelId">
+                    <SelectTrigger id="channelId" className="w-48">
+                      <SelectValue placeholder="媒体を選択" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {channels?.map((channel) => (
+                        <SelectItem key={channel.id} value={channel.id}>
+                          {channel.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="visitDate">初診日</Label>
+                  <Input
+                    id="visitDate"
+                    name="visitDate"
+                    type="date"
+                    defaultValue={new Date().toISOString().slice(0, 10)}
+                    required
+                  />
+                </div>
+                <Button type="submit" disabled={!channels?.length}>
+                  登録
+                </Button>
+              </form>
+              {!channels?.length && (
+                <p className="mt-2 text-sm text-muted-foreground">
+                  媒体が未登録です。マスタ管理から流入媒体を登録してください。
+                </p>
+              )}
+              {errorMessage && (
+                <p className="mt-2 text-sm text-destructive">{errorMessage}</p>
+              )}
+            </CardContent>
+          </Card>
+
           <div className="rounded-lg border bg-background">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>担当スタッフ</TableHead>
-                  <TableHead className="text-right">集客数（初診数）</TableHead>
-                  <TableHead className="text-right">初診率</TableHead>
-                  <TableHead className="text-right">成約率</TableHead>
+                  <TableHead>初診日</TableHead>
+                  <TableHead>患者名</TableHead>
+                  <TableHead>性別</TableHead>
+                  <TableHead>担当者</TableHead>
+                  <TableHead>流入媒体</TableHead>
+                  <TableHead>2回目来院</TableHead>
+                  <TableHead>成約</TableHead>
+                  <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {staffRows.map((row) => (
-                  <TableRow key={row.created_by ?? row.staff_name}>
-                    <TableCell className="font-medium">{row.staff_name}</TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {row.patient_count}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {formatPercent(row.second_visit_count, row.patient_count)}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {formatPercent(row.contracted_count, row.patient_count)}
+                {patients?.map((patient) => {
+                  const updatePatientWithId = updatePatient.bind(null, patient.id);
+                  const deletePatientWithId = deletePatient.bind(null, patient.id);
+                  const hasSecondVisit = Boolean(patient.second_visit_date);
+                  const isContracted = patient.contract_status === "contracted";
+                  return (
+                    <TableRow key={patient.id}>
+                      <TableCell className="whitespace-nowrap">
+                        {patient.visit_date}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap font-medium">
+                        {patient.patient_name}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap">
+                        {GENDER_LABEL[patient.gender as PatientGender]}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap">
+                        {patient.profiles?.display_name ?? "—"}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap">
+                        {patient.channels?.name ?? "—"}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={hasSecondVisit ? "secondary" : "outline"}>
+                          {hasSecondVisit ? "あり" : "なし"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={isContracted ? "secondary" : "outline"}>
+                          {isContracted ? "あり" : "なし"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <details className="text-right">
+                          <summary className="cursor-pointer text-muted-foreground select-none">
+                            編集
+                          </summary>
+                          <form
+                            action={updatePatientWithId}
+                            className="mt-2 flex flex-wrap items-center justify-end gap-2"
+                          >
+                            <input type="hidden" name="storeId" value={storeId} />
+                            <Input
+                              type="date"
+                              name="secondVisitDate"
+                              defaultValue={patient.second_visit_date ?? ""}
+                              className="w-40"
+                            />
+                            <Select
+                              name="contractStatus"
+                              defaultValue={patient.contract_status}
+                            >
+                              <SelectTrigger className="w-28">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {Object.entries(CONTRACT_LABEL).map(([value, label]) => (
+                                  <SelectItem key={value} value={value}>
+                                    {label}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <Button type="submit" size="sm" variant="outline">
+                              更新
+                            </Button>
+                            <ConfirmSubmitButton
+                              formAction={deletePatientWithId}
+                              confirmMessage={`「${patient.patient_name}」の記録を削除しますか？この操作は取り消せません。`}
+                              size="sm"
+                              variant="destructive"
+                            >
+                              削除
+                            </ConfirmSubmitButton>
+                          </form>
+                        </details>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+                {!patients?.length && (
+                  <TableRow>
+                    <TableCell
+                      colSpan={8}
+                      className="text-center text-muted-foreground"
+                    >
+                      この店舗の初診患者はまだ登録されていません。
                     </TableCell>
                   </TableRow>
-                ))}
+                )}
               </TableBody>
             </Table>
           </div>
-        </>
-      )}
+        </TabsContent>
 
-      <Card>
-        <CardContent>
-          <h2 className="mb-3 text-sm font-medium">新規登録</h2>
-          <form action={createPatient} className="flex flex-wrap items-end gap-3">
-            {profile.role === "admin" && (
-              <input type="hidden" name="storeId" value={storeId} />
-            )}
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="patientName">患者名</Label>
-              <Input id="patientName" name="patientName" required className="w-36" />
-            </div>
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="channelId">流入媒体</Label>
-              <Select name="channelId">
-                <SelectTrigger id="channelId" className="w-48">
-                  <SelectValue placeholder="媒体を選択" />
-                </SelectTrigger>
-                <SelectContent>
-                  {channels?.map((channel) => (
-                    <SelectItem key={channel.id} value={channel.id}>
-                      {channel.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="visitDate">初診日</Label>
-              <Input
-                id="visitDate"
-                name="visitDate"
-                type="date"
-                defaultValue={new Date().toISOString().slice(0, 10)}
-                required
-              />
-            </div>
-            <Button type="submit" disabled={!channels?.length}>
-              登録
-            </Button>
-          </form>
-          {!channels?.length && (
-            <p className="mt-2 text-sm text-muted-foreground">
-              媒体が未登録です。マスタ管理から流入媒体を登録してください。
-            </p>
-          )}
-          {errorMessage && (
-            <p className="mt-2 text-sm text-destructive">{errorMessage}</p>
-          )}
-        </CardContent>
-      </Card>
+        <TabsContent value="analysis" className="flex flex-col gap-6 pt-4">
+          <div>
+            <h2 className="mb-2 text-sm font-medium text-muted-foreground">
+              担当者別（初診率＝2回目来院した割合）
+            </h2>
+            <AnalysisTable
+              rows={staffRows}
+              labelHeaders={["担当者"]}
+              getLabels={(row) => [row.staff_name]}
+              emptyMessage="まだ実績がありません。"
+            />
+          </div>
 
-      <div className="rounded-lg border bg-background">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>患者名</TableHead>
-              <TableHead>初診日</TableHead>
-              <TableHead>流入媒体</TableHead>
-              <TableHead>2回目来院</TableHead>
-              <TableHead>成約状況</TableHead>
-              <TableHead className="text-right">操作</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {patients?.map((patient) => {
-              const updatePatientWithId = updatePatient.bind(null, patient.id);
-              const deletePatientWithId = deletePatient.bind(null, patient.id);
-              const hasSecondVisit = Boolean(patient.second_visit_date);
-              const isContracted = patient.contract_status === "contracted";
-              return (
-                <TableRow key={patient.id}>
-                  <TableCell className="whitespace-nowrap font-medium">
-                    {patient.patient_name}
-                  </TableCell>
-                  <TableCell className="whitespace-nowrap">
-                    {patient.visit_date}
-                  </TableCell>
-                  <TableCell className="whitespace-nowrap">
-                    {patient.channels?.name ?? "—"}
-                  </TableCell>
-                  <TableCell colSpan={3}>
-                    <form
-                      action={updatePatientWithId}
-                      className="flex flex-wrap items-center gap-2"
-                    >
-                      <input type="hidden" name="storeId" value={storeId} />
-                      <div className="flex items-center gap-1.5">
-                        <Badge variant={hasSecondVisit ? "secondary" : "outline"}>
-                          {hasSecondVisit ? "来院済み" : "未来院"}
-                        </Badge>
-                        <Input
-                          type="date"
-                          name="secondVisitDate"
-                          defaultValue={patient.second_visit_date ?? ""}
-                          className="w-40"
-                        />
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <Badge variant={isContracted ? "secondary" : "outline"}>
-                          {isContracted ? "成約" : "未成約"}
-                        </Badge>
-                        <Select
-                          name="contractStatus"
-                          defaultValue={patient.contract_status}
-                        >
-                          <SelectTrigger className="w-28">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {Object.entries(CONTRACT_LABEL).map(([value, label]) => (
-                              <SelectItem key={value} value={value}>
-                                {label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <Button type="submit" size="sm" variant="outline">
-                        更新
-                      </Button>
-                      <ConfirmSubmitButton
-                        formAction={deletePatientWithId}
-                        confirmMessage={`「${patient.patient_name}」の記録を削除しますか？この操作は取り消せません。`}
-                        size="sm"
-                        variant="destructive"
-                      >
-                        削除
-                      </ConfirmSubmitButton>
-                    </form>
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-            {!patients?.length && (
-              <TableRow>
-                <TableCell
-                  colSpan={6}
-                  className="text-center text-muted-foreground"
-                >
-                  この店舗の初診患者はまだ登録されていません。
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </div>
+          <div>
+            <h2 className="mb-2 text-sm font-medium text-muted-foreground">
+              担当者別 × 流入媒体別
+            </h2>
+            <AnalysisTable
+              rows={staffChannelRows}
+              labelHeaders={["担当者", "流入媒体"]}
+              getLabels={(row) => [row.staff_name, row.channel_name]}
+              emptyMessage="まだ実績がありません。"
+            />
+          </div>
+
+          <div>
+            <h2 className="mb-2 text-sm font-medium text-muted-foreground">
+              担当者別 × 性別
+            </h2>
+            <AnalysisTable
+              rows={staffGenderRows}
+              labelHeaders={["担当者", "性別"]}
+              getLabels={(row) => [row.staff_name, GENDER_LABEL[row.gender]]}
+              emptyMessage="まだ実績がありません。"
+            />
+          </div>
+
+          <div>
+            <h2 className="mb-2 text-sm font-medium text-muted-foreground">
+              店舗全体 × 流入媒体別（合計行が店舗全体の初診率・成約率）
+            </h2>
+            <AnalysisTable
+              rows={channelRows}
+              labelHeaders={["流入媒体"]}
+              getLabels={(row) => [row.channel_name]}
+              emptyMessage="まだ実績がありません。"
+            />
+          </div>
+
+          <div>
+            <h2 className="mb-2 text-sm font-medium text-muted-foreground">
+              店舗全体 × 性別
+            </h2>
+            <AnalysisTable
+              rows={genderRows}
+              labelHeaders={["性別"]}
+              getLabels={(row) => [GENDER_LABEL[row.gender]]}
+              emptyMessage="まだ実績がありません。"
+            />
+          </div>
+        </TabsContent>
+      </Tabs>
+
       {profile.role === "admin" && (
         <p className="text-xs text-muted-foreground">
           エリア・全社の集計や集客費は

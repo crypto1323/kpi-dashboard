@@ -30,6 +30,12 @@ export const contractStatusEnum = pgEnum("contract_status", [
   "declined",
 ]);
 
+export const patientGenderEnum = pgEnum("patient_gender", [
+  "male",
+  "female",
+  "other",
+]);
+
 export const areas = pgTable("areas", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   name: text("name").notNull(),
@@ -117,6 +123,7 @@ export const patients = pgTable(
       .notNull()
       .references(() => channels.id, { onDelete: "restrict" }),
     patientName: text("patient_name").notNull(),
+    gender: patientGenderEnum("gender").notNull().default("other"),
     visitDate: date("visit_date").notNull(),
     secondVisitDate: date("second_visit_date"),
     contractStatus: contractStatusEnum("contract_status")
