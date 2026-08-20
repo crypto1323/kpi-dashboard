@@ -27,10 +27,12 @@ export async function createPatient(formData: FormData) {
     ? (genderRaw as PatientGender)
     : null;
   const visitDate = String(formData.get("visitDate") ?? "");
+  const month = String(formData.get("month") ?? "");
+  const monthQuery = month ? `&month=${month}` : "";
 
   if (!storeId || !channelId || !patientName || !assigneeName || !gender || !visitDate) {
     redirect(
-      `/dashboard/patients?error=${encodeURIComponent("患者名・担当者・性別・流入媒体・初診日を入力してください。")}&storeId=${storeId ?? ""}`,
+      `/dashboard/patients?error=${encodeURIComponent("患者名・担当者・性別・流入媒体・初診日を入力してください。")}&storeId=${storeId ?? ""}${monthQuery}`,
     );
   }
 
@@ -47,18 +49,20 @@ export async function createPatient(formData: FormData) {
 
   if (error) {
     redirect(
-      `/dashboard/patients?error=${encodeURIComponent(error.message)}&storeId=${storeId}`,
+      `/dashboard/patients?error=${encodeURIComponent(error.message)}&storeId=${storeId}${monthQuery}`,
     );
   }
 
   revalidatePath("/dashboard/patients");
-  redirect(`/dashboard/patients?storeId=${storeId}`);
+  redirect(`/dashboard/patients?storeId=${storeId}${monthQuery}`);
 }
 
 export async function updatePatient(id: string, formData: FormData) {
   await getCurrentProfile();
 
   const storeId = String(formData.get("storeId") ?? "");
+  const month = String(formData.get("month") ?? "");
+  const monthQuery = month ? `&month=${month}` : "";
   const secondVisitDate = String(formData.get("secondVisitDate") ?? "").trim();
   const contractStatusRaw = String(formData.get("contractStatus") ?? "pending");
   const contractStatus = CONTRACT_STATUSES.includes(
@@ -92,27 +96,29 @@ export async function updatePatient(id: string, formData: FormData) {
 
   if (error) {
     redirect(
-      `/dashboard/patients?error=${encodeURIComponent(error.message)}&storeId=${storeId}`,
+      `/dashboard/patients?error=${encodeURIComponent(error.message)}&storeId=${storeId}${monthQuery}`,
     );
   }
 
   revalidatePath("/dashboard/patients");
-  redirect(`/dashboard/patients?storeId=${storeId}`);
+  redirect(`/dashboard/patients?storeId=${storeId}${monthQuery}`);
 }
 
 export async function deletePatient(id: string, formData: FormData) {
   await getCurrentProfile();
   const storeId = String(formData.get("storeId") ?? "");
+  const month = String(formData.get("month") ?? "");
+  const monthQuery = month ? `&month=${month}` : "";
 
   const supabase = await createClient();
   const { error } = await supabase.from("patients").delete().eq("id", id);
 
   if (error) {
     redirect(
-      `/dashboard/patients?error=${encodeURIComponent(error.message)}&storeId=${storeId}`,
+      `/dashboard/patients?error=${encodeURIComponent(error.message)}&storeId=${storeId}${monthQuery}`,
     );
   }
 
   revalidatePath("/dashboard/patients");
-  redirect(`/dashboard/patients?storeId=${storeId}`);
+  redirect(`/dashboard/patients?storeId=${storeId}${monthQuery}`);
 }

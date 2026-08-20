@@ -82,6 +82,7 @@ export interface ChannelPerformanceRow {
   area_id?: string | null;
   channel_id: string;
   channel_name: string;
+  month: string;
   patient_count: number;
   second_visit_count: number;
   contracted_count: number;
@@ -92,6 +93,7 @@ export interface ChannelPerformanceRow {
 export interface StaffPerformanceRow {
   store_id: string;
   staff_name: string;
+  month: string;
   patient_count: number;
   second_visit_count: number;
   contracted_count: number;
@@ -103,6 +105,7 @@ export interface StaffChannelPerformanceRow {
   staff_name: string;
   channel_id: string;
   channel_name: string;
+  month: string;
   patient_count: number;
   second_visit_count: number;
   contracted_count: number;
@@ -113,6 +116,7 @@ export interface StaffGenderPerformanceRow {
   store_id: string;
   staff_name: string;
   gender: PatientGender;
+  month: string;
   patient_count: number;
   second_visit_count: number;
   contracted_count: number;
@@ -122,6 +126,7 @@ export interface StaffGenderPerformanceRow {
 export interface GenderPerformanceRow {
   store_id: string;
   gender: PatientGender;
+  month: string;
   patient_count: number;
   second_visit_count: number;
   contracted_count: number;
@@ -131,6 +136,7 @@ export interface GenderPerformanceRow {
 export interface StaffRollupRow {
   area_id?: string;
   staff_name: string;
+  month: string;
   patient_count: number;
   second_visit_count: number;
   contracted_count: number;
@@ -140,6 +146,7 @@ export interface StaffRollupRow {
 export interface GenderRollupRow {
   area_id?: string;
   gender: PatientGender;
+  month: string;
   patient_count: number;
   second_visit_count: number;
   contracted_count: number;

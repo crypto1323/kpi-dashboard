@@ -16,11 +16,13 @@ import {
 } from "@/components/ui/table";
 import { HqScopeSwitcher } from "@/components/hq-scope-switcher";
 import { QueryParamSelect } from "@/components/query-param-select";
+import { MonthSwitcher } from "@/components/month-switcher";
 import { RateBarChart } from "@/components/charts/RateBarChart";
 import { CpaBarChart } from "@/components/charts/CpaBarChart";
 import { StatTile } from "@/components/charts/StatTile";
 import { Meter } from "@/components/charts/Meter";
 import { upsertChannelSpend } from "./actions";
+import { monthStartDate, prevMonthOf, resolveMonthParam } from "@/lib/month";
 import type {
   ChannelPerformanceRow,
   GenderRollupRow,
@@ -97,7 +99,7 @@ function RollupTable<T extends MetricRow>({
           {!rows.length && (
             <TableRow>
               <TableCell colSpan={4} className="text-center text-muted-foreground">
-                まだ実績がありません。
+                この月の実績はまだありません。
               </TableCell>
             </TableRow>
           )}
@@ -131,18 +133,6 @@ function toChartData<T extends MetricRow>(rows: T[], label: (row: T) => string) 
   }));
 }
 
-function nextMonthStart(month: string) {
-  const [year, m] = month.split("-").map(Number);
-  // JS Date months are 0-indexed, so passing the 1-indexed `m` lands on next month's 1st.
-  return new Date(Date.UTC(year, m, 1)).toISOString().slice(0, 10);
-}
-
-function prevMonthOf(month: string) {
-  const [year, m] = month.split("-").map(Number);
-  // m is 1-indexed; m-2 as a 0-indexed month is one month earlier.
-  return new Date(Date.UTC(year, m - 2, 1)).toISOString().slice(0, 7);
-}
-
 export default async function HqDashboardPage({
   searchParams,
 }: PageProps<"/hq-dashboard">) {
@@ -151,9 +141,8 @@ export default async function HqDashboardPage({
   const supabase = await createClient();
 
   const errorMessage = Array.isArray(params.error) ? params.error[0] : params.error;
-  const month =
-    (Array.isArray(params.month) ? params.month[0] : params.month) ??
-    new Date().toISOString().slice(0, 7);
+  const month = resolveMonthParam(params.month);
+  const monthStart = monthStartDate(month);
 
   let scope: string;
   let heading = "";
@@ -194,15 +183,18 @@ export default async function HqDashboardPage({
     { data: scopeStores },
     { data: channels },
   ] = await Promise.all([
-    isCompany
+    (isCompany
       ? supabase.from("channel_performance_company").select("*")
-      : supabase.from("channel_performance_by_area").select("*").eq("area_id", scope),
-    isCompany
+      : supabase.from("channel_performance_by_area").select("*").eq("area_id", scope)
+    ).eq("month", monthStart),
+    (isCompany
       ? supabase.from("patient_performance_by_staff_company").select("*")
-      : supabase.from("patient_performance_by_staff_area").select("*").eq("area_id", scope),
-    isCompany
+      : supabase.from("patient_performance_by_staff_area").select("*").eq("area_id", scope)
+    ).eq("month", monthStart),
+    (isCompany
       ? supabase.from("patient_performance_by_gender_company").select("*")
-      : supabase.from("patient_performance_by_gender_area").select("*").eq("area_id", scope),
+      : supabase.from("patient_performance_by_gender_area").select("*").eq("area_id", scope)
+    ).eq("month", monthStart),
     isCompany
       ? supabase.from("stores").select("id, code, name").eq("is_active", true).order("code")
       : supabase
@@ -225,47 +217,18 @@ export default async function HqDashboardPage({
   );
   const storeTotal = sumTotals(channelRows);
 
-  // --- 集客費・CPA（選択した月・スコープ） ---
-  const storeIds = (scopeStores ?? []).map((store) => store.id);
-  const monthStart = `${month}-01`;
-  const monthEnd = nextMonthStart(month);
-
-  const [{ data: monthSpends }, { data: monthPatients }] = storeIds.length
-    ? await Promise.all([
-        supabase
-          .from("channel_spends")
-          .select("channel_id, amount")
-          .in("store_id", storeIds)
-          .eq("period", monthStart),
-        supabase
-          .from("patients")
-          .select("channel_id")
-          .in("store_id", storeIds)
-          .gte("visit_date", monthStart)
-          .lt("visit_date", monthEnd),
-      ])
-    : [{ data: [] }, { data: [] }];
-
-  const spendByChannel = new Map<string, number>();
-  for (const row of monthSpends ?? []) {
-    spendByChannel.set(row.channel_id, (spendByChannel.get(row.channel_id) ?? 0) + row.amount);
-  }
-  const visitsByChannel = new Map<string, number>();
-  for (const row of monthPatients ?? []) {
-    visitsByChannel.set(row.channel_id, (visitsByChannel.get(row.channel_id) ?? 0) + 1);
-  }
-
-  const cpaRows = (channels ?? []).map((channel) => {
-    const amount = spendByChannel.get(channel.id) ?? 0;
-    const visits = visitsByChannel.get(channel.id) ?? 0;
-    return {
-      channelId: channel.id,
-      channelName: channel.name,
-      amount,
-      visits,
-      cpa: visits === 0 ? null : Math.round(amount / visits),
-    };
-  });
+  // --- 集客費・CPA（選択した月・スコープ）。channel_performance_by_* が
+  //     すでに月×媒体で spend_amount / patient_count を持っているので、
+  //     ここから直接CPAを算出できる（別クエリ不要）。 ---
+  const cpaRows = channelRows
+    .map((row) => ({
+      channelId: row.channel_id,
+      channelName: row.channel_name,
+      amount: row.spend_amount,
+      visits: row.patient_count,
+      cpa: row.patient_count === 0 ? null : Math.round(row.spend_amount / row.patient_count),
+    }))
+    .sort((a, b) => b.amount - a.amount);
   const cpaChartData = cpaRows
     .filter((row): row is typeof row & { cpa: number } => row.cpa !== null)
     .map((row) => ({ label: row.channelName, cpa: row.cpa }));
@@ -298,7 +261,7 @@ export default async function HqDashboardPage({
         .from("channel_spends")
         .select("channel_id, amount")
         .eq("store_id", spendStoreId)
-        .eq("period", `${prevMonth}-01`),
+        .eq("period", monthStartDate(prevMonth)),
     ]);
 
     const thisMonthMap = new Map((thisMonthSpends ?? []).map((row) => [row.channel_id, row.amount]));
@@ -323,14 +286,17 @@ export default async function HqDashboardPage({
           <h1 className="text-lg font-semibold">統合ダッシュボード</h1>
           <p className="text-sm text-muted-foreground">{heading}</p>
         </div>
-        {areaSwitcherProps && <HqScopeSwitcher {...areaSwitcherProps} />}
+        <div className="flex items-center gap-3">
+          {areaSwitcherProps && <HqScopeSwitcher {...areaSwitcherProps} />}
+          <MonthSwitcher value={month} />
+        </div>
       </div>
 
       {errorMessage && <p className="text-sm text-destructive">{errorMessage}</p>}
 
       <Card>
         <CardContent>
-          <h2 className="mb-3 text-sm font-medium">サマリー</h2>
+          <h2 className="mb-3 text-sm font-medium">サマリー（{month}）</h2>
           <div className="mb-4 grid grid-cols-3 gap-3">
             <StatTile label="集客数（初診数）" value={`${storeTotal.patient_count}人`} />
             <StatTile
@@ -385,21 +351,7 @@ export default async function HqDashboardPage({
 
       <Card>
         <CardContent>
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-sm font-medium">集客費・CPA分析（{month}）</h2>
-            <form method="get" className="flex items-center gap-2">
-              <input type="hidden" name="scope" value={scope} />
-              <Input
-                type="month"
-                name="month"
-                defaultValue={month}
-                className="h-8 w-36"
-              />
-              <Button type="submit" size="sm" variant="outline">
-                表示
-              </Button>
-            </form>
-          </div>
+          <h2 className="mb-4 text-sm font-medium">集客費・CPA分析（{month}）</h2>
 
           {profile.role === "admin" && spendStoreId && (
             <div className="mb-5 border-b pb-5">
@@ -482,7 +434,7 @@ export default async function HqDashboardPage({
                   {!cpaRows.length && (
                     <TableRow>
                       <TableCell colSpan={4} className="text-center text-muted-foreground">
-                        媒体が未登録です。
+                        この月のデータがまだありません。
                       </TableCell>
                     </TableRow>
                   )}

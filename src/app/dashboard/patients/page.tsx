@@ -24,12 +24,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { StoreSwitcher } from "@/components/store-switcher";
+import { MonthSwitcher } from "@/components/month-switcher";
 import { ConfirmSubmitButton } from "@/components/confirm-submit-button";
 import { RateBarChart } from "@/components/charts/RateBarChart";
 import { StaffCrossChart } from "@/components/charts/StaffCrossChart";
 import { StatTile } from "@/components/charts/StatTile";
 import { Meter } from "@/components/charts/Meter";
 import { createPatient, deletePatient, updatePatient } from "./actions";
+import { currentMonth, monthStartDate, nextMonthStart, resolveMonthParam } from "@/lib/month";
 import type {
   ChannelPerformanceRow,
   GenderPerformanceRow,
@@ -159,7 +161,10 @@ export default async function PatientsPage({
   searchParams,
 }: PageProps<"/dashboard/patients">) {
   const profile = await getCurrentProfile();
-  const { error, storeId: storeIdParam } = await searchParams;
+  const { error, storeId: storeIdParam, month: monthParam } = await searchParams;
+  const month = resolveMonthParam(monthParam);
+  const monthStart = monthStartDate(month);
+  const monthEnd = nextMonthStart(month);
 
   if (profile.role === "area_manager") {
     return (
@@ -224,20 +229,35 @@ export default async function PatientsPage({
       .from("patients")
       .select("*, channels(name)")
       .eq("store_id", storeId)
-      .order("visit_date", { ascending: false })
-      .limit(50),
+      .gte("visit_date", monthStart)
+      .lt("visit_date", monthEnd)
+      .order("visit_date", { ascending: false }),
     supabase.from("stores").select("code, name").eq("id", storeId).single(),
-    supabase.from("channel_performance_by_store").select("*").eq("store_id", storeId),
-    supabase.from("patient_performance_by_staff").select("*").eq("store_id", storeId),
+    supabase
+      .from("channel_performance_by_store")
+      .select("*")
+      .eq("store_id", storeId)
+      .eq("month", monthStart),
+    supabase
+      .from("patient_performance_by_staff")
+      .select("*")
+      .eq("store_id", storeId)
+      .eq("month", monthStart),
     supabase
       .from("patient_performance_by_staff_channel")
       .select("*")
-      .eq("store_id", storeId),
+      .eq("store_id", storeId)
+      .eq("month", monthStart),
     supabase
       .from("patient_performance_by_staff_gender")
       .select("*")
-      .eq("store_id", storeId),
-    supabase.from("patient_performance_by_gender").select("*").eq("store_id", storeId),
+      .eq("store_id", storeId)
+      .eq("month", monthStart),
+    supabase
+      .from("patient_performance_by_gender")
+      .select("*")
+      .eq("store_id", storeId)
+      .eq("month", monthStart),
   ]);
 
   const errorMessage = Array.isArray(error) ? error[0] : error;
@@ -272,6 +292,8 @@ export default async function PatientsPage({
       成約率: Number(rate(row.contracted_count, row.patient_count).toFixed(1)),
     }));
   }
+  const defaultVisitDate =
+    month === currentMonth() ? new Date().toISOString().slice(0, 10) : monthStart;
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 pb-12">
@@ -282,9 +304,12 @@ export default async function PatientsPage({
             {store ? `${store.code} ${store.name}` : ""}
           </p>
         </div>
-        {profile.role === "admin" && activeStores.length > 0 && (
-          <StoreSwitcher stores={activeStores} value={storeId} />
-        )}
+        <div className="flex items-center gap-3">
+          {profile.role === "admin" && activeStores.length > 0 && (
+            <StoreSwitcher stores={activeStores} value={storeId} />
+          )}
+          <MonthSwitcher value={month} />
+        </div>
       </div>
 
       <Tabs defaultValue="entry">
@@ -304,6 +329,7 @@ export default async function PatientsPage({
                 {profile.role === "admin" && (
                   <input type="hidden" name="storeId" value={storeId} />
                 )}
+                <input type="hidden" name="month" value={month} />
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="patientName">患者名</Label>
                   <Input
@@ -365,7 +391,11 @@ export default async function PatientsPage({
                     id="visitDate"
                     name="visitDate"
                     type="date"
-                    defaultValue={new Date().toISOString().slice(0, 10)}
+                    defaultValue={defaultVisitDate}
+                    min={monthStart}
+                    max={new Date(new Date(monthEnd).getTime() - 86400000)
+                      .toISOString()
+                      .slice(0, 10)}
                     required
                   />
                 </div>
@@ -441,6 +471,7 @@ export default async function PatientsPage({
                             className="mt-2 flex flex-wrap items-center justify-end gap-2"
                           >
                             <input type="hidden" name="storeId" value={storeId} />
+                            <input type="hidden" name="month" value={month} />
                             <Input
                               type="date"
                               name="secondVisitDate"
@@ -486,7 +517,7 @@ export default async function PatientsPage({
                       colSpan={8}
                       className="text-center text-muted-foreground"
                     >
-                      この店舗の初診患者はまだ登録されていません。
+                      {month}のこの店舗の初診患者はまだ登録されていません。
                     </TableCell>
                   </TableRow>
                 )}

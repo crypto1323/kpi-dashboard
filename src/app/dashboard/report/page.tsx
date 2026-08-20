@@ -14,6 +14,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { AreaSwitcher } from "@/components/area-switcher";
+import { MonthSwitcher } from "@/components/month-switcher";
+import { monthStartDate, resolveMonthParam } from "@/lib/month";
 import type { ChannelPerformanceRow } from "@/lib/types";
 
 function formatPercent(numerator: number, denominator: number) {
@@ -36,6 +38,8 @@ export default async function ReportPage({
 
   const params = await searchParams;
   const supabase = await createClient();
+  const month = resolveMonthParam(params.month);
+  const monthStart = monthStartDate(month);
 
   let level: "area" | "company";
   let heading = "";
@@ -58,7 +62,8 @@ export default async function ReportPage({
       supabase
         .from("channel_performance_by_area")
         .select("*")
-        .eq("area_id", profile.area_id),
+        .eq("area_id", profile.area_id)
+        .eq("month", monthStart),
     ]);
     heading = area ? area.name : "エリア別レポート";
     rows = data ?? [];
@@ -78,7 +83,11 @@ export default async function ReportPage({
       if (areaId) {
         const [{ data: area }, { data }] = await Promise.all([
           supabase.from("areas").select("name").eq("id", areaId).single(),
-          supabase.from("channel_performance_by_area").select("*").eq("area_id", areaId),
+          supabase
+            .from("channel_performance_by_area")
+            .select("*")
+            .eq("area_id", areaId)
+            .eq("month", monthStart),
         ]);
         heading = area ? area.name : "";
         rows = data ?? [];
@@ -86,7 +95,10 @@ export default async function ReportPage({
       }
     } else {
       heading = "全社";
-      const { data } = await supabase.from("channel_performance_company").select("*");
+      const { data } = await supabase
+        .from("channel_performance_company")
+        .select("*")
+        .eq("month", monthStart);
       rows = data ?? [];
     }
   }
@@ -130,6 +142,7 @@ export default async function ReportPage({
             </div>
           )}
           {areaSwitcherProps && <AreaSwitcher {...areaSwitcherProps} />}
+          <MonthSwitcher value={month} />
           {profile.role === "admin" && (
             <Button
               size="sm"
@@ -178,7 +191,7 @@ export default async function ReportPage({
             {!rows.length && (
               <TableRow>
                 <TableCell colSpan={6} className="text-center text-muted-foreground">
-                  集計対象のデータがまだありません。
+                  この月の集計対象データはまだありません。
                 </TableCell>
               </TableRow>
             )}
