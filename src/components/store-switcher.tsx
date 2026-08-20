@@ -19,9 +19,13 @@ export function StoreSwitcher({
 }) {
   const router = useRouter();
   const pathname = usePathname();
+  const items = Object.fromEntries(
+    stores.map((store) => [store.id, `${store.code} ${store.name}`]),
+  );
 
   return (
     <Select
+      items={items}
       value={value}
       onValueChange={(storeId) => {
         router.push(`${pathname}?storeId=${storeId}`);

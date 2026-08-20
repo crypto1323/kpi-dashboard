@@ -62,7 +62,13 @@ export default async function EditUserPage({
             </div>
             <div className="flex flex-col gap-2">
               <Label htmlFor="role">権限</Label>
-              <Select name="role" defaultValue={profile.role}>
+              <Select
+                name="role"
+                defaultValue={profile.role}
+                items={Object.fromEntries(
+                  ROLE_OPTIONS.map((option) => [option.value, option.label]),
+                )}
+              >
                 <SelectTrigger id="role" className="w-full">
                   <SelectValue />
                 </SelectTrigger>
@@ -77,7 +83,16 @@ export default async function EditUserPage({
             </div>
             <div className="flex flex-col gap-2">
               <Label htmlFor="storeId">所属店舗（現場スタッフの場合）</Label>
-              <Select name="storeId" defaultValue={profile.store_id ?? ""}>
+              <Select
+                name="storeId"
+                defaultValue={profile.store_id ?? ""}
+                items={{
+                  "": "未設定",
+                  ...Object.fromEntries(
+                    (stores ?? []).map((store) => [store.id, `${store.code} ${store.name}`]),
+                  ),
+                }}
+              >
                 <SelectTrigger id="storeId" className="w-full">
                   <SelectValue placeholder="未設定" />
                 </SelectTrigger>
@@ -93,7 +108,14 @@ export default async function EditUserPage({
             </div>
             <div className="flex flex-col gap-2">
               <Label htmlFor="areaId">所属エリア（エリア長の場合）</Label>
-              <Select name="areaId" defaultValue={profile.area_id ?? ""}>
+              <Select
+                name="areaId"
+                defaultValue={profile.area_id ?? ""}
+                items={{
+                  "": "未設定",
+                  ...Object.fromEntries((areas ?? []).map((area) => [area.id, area.name])),
+                }}
+              >
                 <SelectTrigger id="areaId" className="w-full">
                   <SelectValue placeholder="未設定" />
                 </SelectTrigger>

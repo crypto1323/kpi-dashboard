@@ -39,7 +39,11 @@ export default async function EditStorePage({
           <form action={updateStoreWithId} className="flex flex-col gap-4">
             <div className="flex flex-col gap-2">
               <Label htmlFor="areaId">エリア</Label>
-              <Select name="areaId" defaultValue={store.area_id}>
+              <Select
+                name="areaId"
+                defaultValue={store.area_id}
+                items={Object.fromEntries((areas ?? []).map((area) => [area.id, area.name]))}
+              >
                 <SelectTrigger id="areaId" className="w-full">
                   <SelectValue placeholder="エリアを選択" />
                 </SelectTrigger>

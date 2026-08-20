@@ -32,7 +32,10 @@ export default async function NewStorePage({
           <form action={createStore} className="flex flex-col gap-4">
             <div className="flex flex-col gap-2">
               <Label htmlFor="areaId">エリア</Label>
-              <Select name="areaId">
+              <Select
+                name="areaId"
+                items={Object.fromEntries((areas ?? []).map((area) => [area.id, area.name]))}
+              >
                 <SelectTrigger id="areaId" className="w-full">
                   <SelectValue placeholder="エリアを選択" />
                 </SelectTrigger>

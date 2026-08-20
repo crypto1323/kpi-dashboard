@@ -18,9 +18,11 @@ export function AreaSwitcher({
 }) {
   const router = useRouter();
   const pathname = usePathname();
+  const items = Object.fromEntries(areas.map((area) => [area.id, area.name]));
 
   return (
     <Select
+      items={items}
       value={value}
       onValueChange={(areaId) => {
         router.push(`${pathname}?level=area&areaId=${areaId}`);

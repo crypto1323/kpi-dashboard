@@ -301,7 +301,7 @@ export default async function PatientsPage({
                 </div>
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="gender">性別</Label>
-                  <Select name="gender">
+                  <Select name="gender" items={GENDER_LABEL}>
                     <SelectTrigger id="gender" className="w-28">
                       <SelectValue placeholder="選択" />
                     </SelectTrigger>
@@ -318,7 +318,12 @@ export default async function PatientsPage({
                 </div>
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="channelId">流入媒体</Label>
-                  <Select name="channelId">
+                  <Select
+                    name="channelId"
+                    items={Object.fromEntries(
+                      (channels ?? []).map((channel) => [channel.id, channel.name]),
+                    )}
+                  >
                     <SelectTrigger id="channelId" className="w-48">
                       <SelectValue placeholder="媒体を選択" />
                     </SelectTrigger>
@@ -422,6 +427,7 @@ export default async function PatientsPage({
                             <Select
                               name="contractStatus"
                               defaultValue={patient.contract_status}
+                              items={CONTRACT_LABEL}
                             >
                               <SelectTrigger className="w-28">
                                 <SelectValue />
