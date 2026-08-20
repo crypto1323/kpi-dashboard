@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import {
   Table,
   TableBody,
@@ -13,14 +14,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { HqScopeSwitcher } from "@/components/hq-scope-switcher";
+import { QueryParamSelect } from "@/components/query-param-select";
 import { RateBarChart } from "@/components/charts/RateBarChart";
 import { CpaBarChart } from "@/components/charts/CpaBarChart";
 import { StatTile } from "@/components/charts/StatTile";
@@ -140,6 +135,12 @@ function nextMonthStart(month: string) {
   const [year, m] = month.split("-").map(Number);
   // JS Date months are 0-indexed, so passing the 1-indexed `m` lands on next month's 1st.
   return new Date(Date.UTC(year, m, 1)).toISOString().slice(0, 10);
+}
+
+function prevMonthOf(month: string) {
+  const [year, m] = month.split("-").map(Number);
+  // m is 1-indexed; m-2 as a 0-indexed month is one month earlier.
+  return new Date(Date.UTC(year, m - 2, 1)).toISOString().slice(0, 7);
 }
 
 export default async function HqDashboardPage({
@@ -269,6 +270,52 @@ export default async function HqDashboardPage({
     .filter((row): row is typeof row & { cpa: number } => row.cpa !== null)
     .map((row) => ({ label: row.channelName, cpa: row.cpa }));
 
+  // --- 集客費の入力（店舗を選び、前月の金額を初期値として引き継ぐ） ---
+  const requestedSpendStore = Array.isArray(params.spendStoreId)
+    ? params.spendStoreId[0]
+    : params.spendStoreId;
+  const spendStoreId =
+    (scopeStores?.some((store) => store.id === requestedSpendStore) ? requestedSpendStore : null) ??
+    scopeStores?.[0]?.id ??
+    null;
+
+  let spendRows: {
+    channelId: string;
+    channelName: string;
+    amount: number;
+    isCarriedOver: boolean;
+  }[] = [];
+
+  if (profile.role === "admin" && spendStoreId) {
+    const prevMonth = prevMonthOf(month);
+    const [{ data: thisMonthSpends }, { data: lastMonthSpends }] = await Promise.all([
+      supabase
+        .from("channel_spends")
+        .select("channel_id, amount")
+        .eq("store_id", spendStoreId)
+        .eq("period", monthStart),
+      supabase
+        .from("channel_spends")
+        .select("channel_id, amount")
+        .eq("store_id", spendStoreId)
+        .eq("period", `${prevMonth}-01`),
+    ]);
+
+    const thisMonthMap = new Map((thisMonthSpends ?? []).map((row) => [row.channel_id, row.amount]));
+    const lastMonthMap = new Map((lastMonthSpends ?? []).map((row) => [row.channel_id, row.amount]));
+
+    spendRows = (channels ?? []).map((channel) => {
+      const savedThisMonth = thisMonthMap.get(channel.id);
+      const carried = lastMonthMap.get(channel.id);
+      return {
+        channelId: channel.id,
+        channelName: channel.name,
+        amount: savedThisMonth ?? carried ?? 0,
+        isCarriedOver: savedThisMonth === undefined && carried !== undefined,
+      };
+    });
+  }
+
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-8 pb-16">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -354,69 +401,53 @@ export default async function HqDashboardPage({
             </form>
           </div>
 
-          {profile.role === "admin" && (
-            <form
-              action={upsertChannelSpend}
-              className="mb-5 flex flex-wrap items-end gap-3 border-b pb-5"
-            >
-              <input type="hidden" name="scope" value={scope} />
-              <input type="hidden" name="period" value={month} />
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="storeId">店舗</Label>
-                <Select
-                  name="storeId"
+          {profile.role === "admin" && spendStoreId && (
+            <div className="mb-5 border-b pb-5">
+              <div className="mb-3 flex flex-wrap items-center gap-3">
+                <Label>集客費を入力する店舗</Label>
+                <QueryParamSelect
+                  paramName="spendStoreId"
+                  value={spendStoreId}
                   items={Object.fromEntries(
                     (scopeStores ?? []).map((store) => [store.id, `${store.code} ${store.name}`]),
                   )}
-                >
-                  <SelectTrigger id="storeId" className="w-48">
-                    <SelectValue placeholder="店舗を選択" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {scopeStores?.map((store) => (
-                      <SelectItem key={store.id} value={store.id}>
-                        {store.code} {store.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="channelId">流入媒体</Label>
-                <Select
-                  name="channelId"
-                  items={Object.fromEntries(
-                    (channels ?? []).map((channel) => [channel.id, channel.name]),
-                  )}
-                >
-                  <SelectTrigger id="channelId" className="w-40">
-                    <SelectValue placeholder="媒体を選択" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {channels?.map((channel) => (
-                      <SelectItem key={channel.id} value={channel.id}>
-                        {channel.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="amount">集客費（円）</Label>
-                <Input
-                  id="amount"
-                  name="amount"
-                  type="number"
-                  min={0}
-                  step={1000}
-                  required
-                  className="w-32"
                 />
+                <p className="text-xs text-muted-foreground">
+                  未入力の媒体には前月の金額を自動で表示します。そのまま保存すれば前月と同額、書き換えれば新しい金額で保存されます。
+                </p>
               </div>
-              <Button type="submit" disabled={!scopeStores?.length || !channels?.length}>
-                登録
-              </Button>
-            </form>
+              <div className="flex flex-col gap-2">
+                {spendRows.map((row) => (
+                  <form
+                    key={row.channelId}
+                    action={upsertChannelSpend}
+                    className="flex flex-wrap items-center gap-2"
+                  >
+                    <input type="hidden" name="scope" value={scope} />
+                    <input type="hidden" name="period" value={month} />
+                    <input type="hidden" name="storeId" value={spendStoreId} />
+                    <input type="hidden" name="channelId" value={row.channelId} />
+                    <span className="w-28 text-sm font-medium">{row.channelName}</span>
+                    <span>¥</span>
+                    <Input
+                      type="number"
+                      name="amount"
+                      min={0}
+                      step={1000}
+                      defaultValue={row.amount}
+                      className="w-32"
+                    />
+                    {row.isCarriedOver && <Badge variant="outline">前月から引継ぎ</Badge>}
+                    <Button type="submit" size="sm" variant="outline">
+                      保存
+                    </Button>
+                  </form>
+                ))}
+                {!spendRows.length && (
+                  <p className="text-sm text-muted-foreground">媒体が未登録です。</p>
+                )}
+              </div>
+            </div>
           )}
           {!scopeStores?.length && (
             <p className="mb-4 text-sm text-muted-foreground">

@@ -16,7 +16,7 @@ export async function upsertChannelSpend(formData: FormData) {
   const amountRaw = String(formData.get("amount") ?? "");
   const amount = Number.parseInt(amountRaw, 10);
 
-  const redirectBase = `/hq-dashboard?scope=${scope}&month=${month}`;
+  const redirectBase = `/hq-dashboard?scope=${scope}&month=${month}&spendStoreId=${storeId}`;
 
   if (!storeId || !channelId || !month || !Number.isFinite(amount) || amount < 0) {
     redirect(`${redirectBase}&error=${encodeURIComponent("店舗・媒体・対象月・金額を入力してください。")}`);
