@@ -5,7 +5,6 @@ const NAV = [
   { href: "/dashboard/master/areas", label: "エリア" },
   { href: "/dashboard/master/stores", label: "店舗" },
   { href: "/dashboard/master/channels", label: "流入媒体" },
-  { href: "/dashboard/master/spend", label: "媒体費用" },
   { href: "/dashboard/master/users", label: "ユーザー" },
 ];
 

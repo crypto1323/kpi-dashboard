@@ -158,6 +158,7 @@ export const channelSpends = pgTable(
     channelId: uuid("channel_id")
       .notNull()
       .references(() => channels.id, { onDelete: "restrict" }),
+    period: date("period").notNull(),
     amount: integer("amount").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -167,9 +168,10 @@ export const channelSpends = pgTable(
       .default(sql`now()`),
   },
   (table) => [
-    uniqueIndex("channel_spends_store_channel_key").on(
+    uniqueIndex("channel_spends_store_channel_period_key").on(
       table.storeId,
       table.channelId,
+      table.period,
     ),
     index("channel_spends_store_id_idx").on(table.storeId),
     index("channel_spends_channel_id_idx").on(table.channelId),

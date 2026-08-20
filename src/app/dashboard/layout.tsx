@@ -37,6 +37,11 @@ export default async function DashboardLayout({
               エリア・全社シート
             </Button>
           )}
+          {profile.role !== "staff" && (
+            <Button variant="ghost" size="sm" render={<Link href="/hq-dashboard" />}>
+              本部ダッシュボード
+            </Button>
+          )}
           {profile.role === "admin" && (
             <Button variant="ghost" size="sm" render={<Link href="/dashboard/master/areas" />}>
               マスタ管理

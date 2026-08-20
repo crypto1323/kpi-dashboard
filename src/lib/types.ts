@@ -70,6 +70,7 @@ export interface ChannelSpend {
   id: string;
   store_id: string;
   channel_id: string;
+  period: string;
   amount: number;
   created_at: string;
   updated_at: string;
@@ -120,6 +121,24 @@ export interface StaffGenderPerformanceRow {
 /** Row shape from patient_performance_by_gender (store-level). */
 export interface GenderPerformanceRow {
   store_id: string;
+  gender: PatientGender;
+  patient_count: number;
+  second_visit_count: number;
+  contracted_count: number;
+}
+
+/** Row shape shared by patient_performance_by_staff_area / _company. */
+export interface StaffRollupRow {
+  area_id?: string;
+  staff_name: string;
+  patient_count: number;
+  second_visit_count: number;
+  contracted_count: number;
+}
+
+/** Row shape shared by patient_performance_by_gender_area / _company. */
+export interface GenderRollupRow {
+  area_id?: string;
   gender: PatientGender;
   patient_count: number;
   second_visit_count: number;

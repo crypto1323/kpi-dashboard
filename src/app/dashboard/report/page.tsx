@@ -134,9 +134,9 @@ export default async function ReportPage({
             <Button
               size="sm"
               variant="outline"
-              render={<Link href="/dashboard/master/spend" />}
+              render={<Link href="/hq-dashboard" />}
             >
-              媒体費用を編集
+              本部ダッシュボードで集客費を編集
             </Button>
           )}
         </div>
