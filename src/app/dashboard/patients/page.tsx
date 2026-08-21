@@ -26,6 +26,7 @@ import {
 import { StoreSwitcher } from "@/components/store-switcher";
 import { MonthSwitcher } from "@/components/month-switcher";
 import { ConfirmSubmitButton } from "@/components/confirm-submit-button";
+import { InlineSelectField, InlineTextField } from "@/components/inline-field";
 import { RateBarChart } from "@/components/charts/RateBarChart";
 import { StaffCrossChart } from "@/components/charts/StaffCrossChart";
 import { StatTile } from "@/components/charts/StatTile";
@@ -35,6 +36,10 @@ import {
   deletePatient,
   toggleContractStatus,
   toggleSecondVisit,
+  updatePatientAssignee,
+  updatePatientGender,
+  updatePatientName,
+  updatePatientVisitDate,
 } from "./actions";
 import { currentMonth, monthStartDate, nextMonthStart, resolveMonthParam } from "@/lib/month";
 import type {
@@ -432,21 +437,52 @@ export default async function PatientsPage({
                   const deletePatientWithId = deletePatient.bind(null, patient.id);
                   const toggleSecondVisitWithId = toggleSecondVisit.bind(null, patient.id);
                   const toggleContractStatusWithId = toggleContractStatus.bind(null, patient.id);
+                  const updateNameWithId = updatePatientName.bind(null, patient.id);
+                  const updateAssigneeWithId = updatePatientAssignee.bind(null, patient.id);
+                  const updateGenderWithId = updatePatientGender.bind(null, patient.id);
+                  const updateVisitDateWithId = updatePatientVisitDate.bind(null, patient.id);
                   const hasSecondVisit = Boolean(patient.second_visit_date);
                   const isContracted = patient.contract_status === "contracted";
+                  const hiddenFields = { storeId, month };
                   return (
                     <TableRow key={patient.id}>
-                      <TableCell className="whitespace-nowrap">
-                        {patient.visit_date}
+                      <TableCell>
+                        <InlineTextField
+                          action={updateVisitDateWithId}
+                          name="visitDate"
+                          type="date"
+                          defaultValue={patient.visit_date}
+                          hidden={hiddenFields}
+                          className="w-36"
+                        />
                       </TableCell>
-                      <TableCell className="whitespace-nowrap font-medium">
-                        {patient.patient_name}
+                      <TableCell>
+                        <InlineTextField
+                          action={updateNameWithId}
+                          name="patientName"
+                          defaultValue={patient.patient_name}
+                          hidden={hiddenFields}
+                          className="w-32 font-medium"
+                        />
                       </TableCell>
-                      <TableCell className="whitespace-nowrap">
-                        {GENDER_LABEL[patient.gender as PatientGender]}
+                      <TableCell>
+                        <InlineSelectField
+                          action={updateGenderWithId}
+                          name="gender"
+                          defaultValue={patient.gender}
+                          items={GENDER_LABEL}
+                          hidden={hiddenFields}
+                          className="w-24"
+                        />
                       </TableCell>
-                      <TableCell className="whitespace-nowrap">
-                        {patient.assignee_name || "—"}
+                      <TableCell>
+                        <InlineTextField
+                          action={updateAssigneeWithId}
+                          name="assigneeName"
+                          defaultValue={patient.assignee_name}
+                          hidden={hiddenFields}
+                          className="w-28"
+                        />
                       </TableCell>
                       <TableCell className="whitespace-nowrap">
                         {patient.channels?.name ?? "—"}

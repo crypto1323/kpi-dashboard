@@ -9,6 +9,32 @@ import type { ContractStatus, PatientGender } from "@/lib/types";
 const CONTRACT_STATUSES: ContractStatus[] = ["pending", "contracted", "declined"];
 const GENDERS: PatientGender[] = ["male", "female", "other"];
 
+function monthQueryFrom(formData: FormData) {
+  const month = String(formData.get("month") ?? "");
+  return month ? `&month=${month}` : "";
+}
+
+/** Shared tail for every inline-edit action: save one column, then bounce back
+ * to the same store/month the row was being viewed from. */
+async function saveField(
+  id: string,
+  storeId: string,
+  monthQuery: string,
+  patch: Record<string, unknown>,
+) {
+  const supabase = await createClient();
+  const { error } = await supabase.from("patients").update(patch).eq("id", id);
+
+  if (error) {
+    redirect(
+      `/dashboard/patients?error=${encodeURIComponent(error.message)}&storeId=${storeId}${monthQuery}`,
+    );
+  }
+
+  revalidatePath("/dashboard/patients");
+  redirect(`/dashboard/patients?storeId=${storeId}${monthQuery}`);
+}
+
 export async function createPatient(formData: FormData) {
   const profile = await getCurrentProfile();
   if (profile.role === "area_manager") {
@@ -27,8 +53,7 @@ export async function createPatient(formData: FormData) {
     ? (genderRaw as PatientGender)
     : null;
   const visitDate = String(formData.get("visitDate") ?? "");
-  const month = String(formData.get("month") ?? "");
-  const monthQuery = month ? `&month=${month}` : "";
+  const monthQuery = monthQueryFrom(formData);
 
   if (!storeId || !channelId || !patientName || !assigneeName || !gender || !visitDate) {
     redirect(
@@ -60,26 +85,11 @@ export async function createPatient(formData: FormData) {
 /** One-tap toggle from the list — no form to expand, saves immediately. */
 export async function toggleSecondVisit(id: string, formData: FormData) {
   await getCurrentProfile();
-
   const storeId = String(formData.get("storeId") ?? "");
-  const month = String(formData.get("month") ?? "");
-  const monthQuery = month ? `&month=${month}` : "";
+  const monthQuery = monthQueryFrom(formData);
   const nextValue = String(formData.get("nextValue") ?? "");
 
-  const supabase = await createClient();
-  const { error } = await supabase
-    .from("patients")
-    .update({ second_visit_date: nextValue || null })
-    .eq("id", id);
-
-  if (error) {
-    redirect(
-      `/dashboard/patients?error=${encodeURIComponent(error.message)}&storeId=${storeId}${monthQuery}`,
-    );
-  }
-
-  revalidatePath("/dashboard/patients");
-  redirect(`/dashboard/patients?storeId=${storeId}${monthQuery}`);
+  await saveField(id, storeId, monthQuery, { second_visit_date: nextValue || null });
 }
 
 /** One-tap toggle from the list — collapses to 成約/未成約 (pending<->contracted).
@@ -87,17 +97,14 @@ export async function toggleSecondVisit(id: string, formData: FormData) {
  * from this quick toggle; it was only ever set through the form this replaces. */
 export async function toggleContractStatus(id: string, formData: FormData) {
   await getCurrentProfile();
-
   const storeId = String(formData.get("storeId") ?? "");
-  const month = String(formData.get("month") ?? "");
-  const monthQuery = month ? `&month=${month}` : "";
+  const monthQuery = monthQueryFrom(formData);
   const nextStatusRaw = String(formData.get("nextStatus") ?? "pending");
   const nextStatus = CONTRACT_STATUSES.includes(nextStatusRaw as ContractStatus)
     ? (nextStatusRaw as ContractStatus)
     : "pending";
 
   const supabase = await createClient();
-
   const { data: current } = await supabase
     .from("patients")
     .select("contracted_date")
@@ -109,26 +116,81 @@ export async function toggleContractStatus(id: string, formData: FormData) {
       ? current?.contracted_date || new Date().toISOString().slice(0, 10)
       : null;
 
-  const { error } = await supabase
-    .from("patients")
-    .update({ contract_status: nextStatus, contracted_date: contractedDate })
-    .eq("id", id);
+  await saveField(id, storeId, monthQuery, {
+    contract_status: nextStatus,
+    contracted_date: contractedDate,
+  });
+}
 
-  if (error) {
+/** Inline-editable cell: 患者名. */
+export async function updatePatientName(id: string, formData: FormData) {
+  await getCurrentProfile();
+  const storeId = String(formData.get("storeId") ?? "");
+  const monthQuery = monthQueryFrom(formData);
+  const patientName = String(formData.get("patientName") ?? "").trim();
+
+  if (!patientName) {
     redirect(
-      `/dashboard/patients?error=${encodeURIComponent(error.message)}&storeId=${storeId}${monthQuery}`,
+      `/dashboard/patients?error=${encodeURIComponent("患者名を入力してください。")}&storeId=${storeId}${monthQuery}`,
     );
   }
 
-  revalidatePath("/dashboard/patients");
-  redirect(`/dashboard/patients?storeId=${storeId}${monthQuery}`);
+  await saveField(id, storeId, monthQuery, { patient_name: patientName });
+}
+
+/** Inline-editable cell: 担当者. */
+export async function updatePatientAssignee(id: string, formData: FormData) {
+  await getCurrentProfile();
+  const storeId = String(formData.get("storeId") ?? "");
+  const monthQuery = monthQueryFrom(formData);
+  const assigneeName = String(formData.get("assigneeName") ?? "").trim();
+
+  if (!assigneeName) {
+    redirect(
+      `/dashboard/patients?error=${encodeURIComponent("担当者を入力してください。")}&storeId=${storeId}${monthQuery}`,
+    );
+  }
+
+  await saveField(id, storeId, monthQuery, { assignee_name: assigneeName });
+}
+
+/** Inline-editable cell: 性別. */
+export async function updatePatientGender(id: string, formData: FormData) {
+  await getCurrentProfile();
+  const storeId = String(formData.get("storeId") ?? "");
+  const monthQuery = monthQueryFrom(formData);
+  const genderRaw = String(formData.get("gender") ?? "");
+
+  if (!GENDERS.includes(genderRaw as PatientGender)) {
+    redirect(
+      `/dashboard/patients?error=${encodeURIComponent("性別を選択してください。")}&storeId=${storeId}${monthQuery}`,
+    );
+  }
+
+  await saveField(id, storeId, monthQuery, { gender: genderRaw });
+}
+
+/** Inline-editable cell: 初診日. Editing it to a different month moves the row
+ * out of the currently viewed month once saved — that's expected, not a bug. */
+export async function updatePatientVisitDate(id: string, formData: FormData) {
+  await getCurrentProfile();
+  const storeId = String(formData.get("storeId") ?? "");
+  const monthQuery = monthQueryFrom(formData);
+  const visitDate = String(formData.get("visitDate") ?? "");
+
+  if (!visitDate) {
+    redirect(
+      `/dashboard/patients?error=${encodeURIComponent("初診日を入力してください。")}&storeId=${storeId}${monthQuery}`,
+    );
+  }
+
+  await saveField(id, storeId, monthQuery, { visit_date: visitDate });
 }
 
 export async function deletePatient(id: string, formData: FormData) {
   await getCurrentProfile();
   const storeId = String(formData.get("storeId") ?? "");
-  const month = String(formData.get("month") ?? "");
-  const monthQuery = month ? `&month=${month}` : "";
+  const monthQuery = monthQueryFrom(formData);
 
   const supabase = await createClient();
   const { error } = await supabase.from("patients").delete().eq("id", id);
