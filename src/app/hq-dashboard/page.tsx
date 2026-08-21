@@ -318,11 +318,31 @@ export default async function HqDashboardPage({
       </Card>
 
       <div>
-        <h2 className="mb-2 text-sm font-medium text-muted-foreground">担当者別</h2>
+        <h2 className="mb-2 text-sm font-medium text-muted-foreground">
+          担当者別（上位10名）
+        </h2>
         <div className="grid gap-6 lg:grid-cols-2">
-          <RollupTable rows={staffRows} labelHeader="担当者" getLabel={(row) => row.staff_name} />
-          <RateBarChart data={toChartData(staffRows, (row) => row.staff_name)} />
+          <RollupTable
+            rows={staffRows.slice(0, 10)}
+            labelHeader="担当者"
+            getLabel={(row) => row.staff_name}
+          />
+          <RateBarChart data={toChartData(staffRows.slice(0, 10), (row) => row.staff_name)} />
         </div>
+        {staffRows.length > 10 && (
+          <details className="mt-3">
+            <summary className="cursor-pointer text-xs text-muted-foreground select-none">
+              11位以降（{staffRows.length - 10}名）を見る
+            </summary>
+            <div className="mt-3">
+              <RollupTable
+                rows={staffRows.slice(10)}
+                labelHeader="担当者"
+                getLabel={(row) => row.staff_name}
+              />
+            </div>
+          </details>
+        )}
       </div>
 
       <div>
