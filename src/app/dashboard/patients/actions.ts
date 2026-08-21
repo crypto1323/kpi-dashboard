@@ -57,41 +57,61 @@ export async function createPatient(formData: FormData) {
   redirect(`/dashboard/patients?storeId=${storeId}${monthQuery}`);
 }
 
-export async function updatePatient(id: string, formData: FormData) {
+/** One-tap toggle from the list — no form to expand, saves immediately. */
+export async function toggleSecondVisit(id: string, formData: FormData) {
   await getCurrentProfile();
 
   const storeId = String(formData.get("storeId") ?? "");
   const month = String(formData.get("month") ?? "");
   const monthQuery = month ? `&month=${month}` : "";
-  const secondVisitDate = String(formData.get("secondVisitDate") ?? "").trim();
-  const contractStatusRaw = String(formData.get("contractStatus") ?? "pending");
-  const contractStatus = CONTRACT_STATUSES.includes(
-    contractStatusRaw as ContractStatus,
-  )
-    ? (contractStatusRaw as ContractStatus)
+  const nextValue = String(formData.get("nextValue") ?? "");
+
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("patients")
+    .update({ second_visit_date: nextValue || null })
+    .eq("id", id);
+
+  if (error) {
+    redirect(
+      `/dashboard/patients?error=${encodeURIComponent(error.message)}&storeId=${storeId}${monthQuery}`,
+    );
+  }
+
+  revalidatePath("/dashboard/patients");
+  redirect(`/dashboard/patients?storeId=${storeId}${monthQuery}`);
+}
+
+/** One-tap toggle from the list — collapses to 成約/未成約 (pending<->contracted).
+ * The 不成約(declined) state still exists in the data model but isn't reachable
+ * from this quick toggle; it was only ever set through the form this replaces. */
+export async function toggleContractStatus(id: string, formData: FormData) {
+  await getCurrentProfile();
+
+  const storeId = String(formData.get("storeId") ?? "");
+  const month = String(formData.get("month") ?? "");
+  const monthQuery = month ? `&month=${month}` : "";
+  const nextStatusRaw = String(formData.get("nextStatus") ?? "pending");
+  const nextStatus = CONTRACT_STATUSES.includes(nextStatusRaw as ContractStatus)
+    ? (nextStatusRaw as ContractStatus)
     : "pending";
 
   const supabase = await createClient();
 
   const { data: current } = await supabase
     .from("patients")
-    .select("contract_status, contracted_date")
+    .select("contracted_date")
     .eq("id", id)
     .single();
 
   const contractedDate =
-    contractStatus !== "contracted"
-      ? null
-      : (current?.contract_status === "contracted" && current.contracted_date) ||
-        new Date().toISOString().slice(0, 10);
+    nextStatus === "contracted"
+      ? current?.contracted_date || new Date().toISOString().slice(0, 10)
+      : null;
 
   const { error } = await supabase
     .from("patients")
-    .update({
-      second_visit_date: secondVisitDate || null,
-      contract_status: contractStatus,
-      contracted_date: contractedDate,
-    })
+    .update({ contract_status: nextStatus, contracted_date: contractedDate })
     .eq("id", id);
 
   if (error) {

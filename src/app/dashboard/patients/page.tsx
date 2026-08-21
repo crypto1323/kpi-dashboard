@@ -30,7 +30,12 @@ import { RateBarChart } from "@/components/charts/RateBarChart";
 import { StaffCrossChart } from "@/components/charts/StaffCrossChart";
 import { StatTile } from "@/components/charts/StatTile";
 import { Meter } from "@/components/charts/Meter";
-import { createPatient, deletePatient, updatePatient } from "./actions";
+import {
+  createPatient,
+  deletePatient,
+  toggleContractStatus,
+  toggleSecondVisit,
+} from "./actions";
 import { currentMonth, monthStartDate, nextMonthStart, resolveMonthParam } from "@/lib/month";
 import type {
   ChannelPerformanceRow,
@@ -40,12 +45,6 @@ import type {
   StaffGenderPerformanceRow,
   StaffPerformanceRow,
 } from "@/lib/types";
-
-const CONTRACT_LABEL: Record<string, string> = {
-  pending: "保留",
-  contracted: "成約",
-  declined: "不成約",
-};
 
 const GENDER_LABEL: Record<PatientGender, string> = {
   male: "男性",
@@ -425,13 +424,14 @@ export default async function PatientsPage({
                   <TableHead>流入媒体</TableHead>
                   <TableHead>2回目来院</TableHead>
                   <TableHead>成約</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead className="text-right">削除</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {patients?.map((patient) => {
-                  const updatePatientWithId = updatePatient.bind(null, patient.id);
                   const deletePatientWithId = deletePatient.bind(null, patient.id);
+                  const toggleSecondVisitWithId = toggleSecondVisit.bind(null, patient.id);
+                  const toggleContractStatusWithId = toggleContractStatus.bind(null, patient.id);
                   const hasSecondVisit = Boolean(patient.second_visit_date);
                   const isContracted = patient.contract_status === "contracted";
                   return (
@@ -452,61 +452,55 @@ export default async function PatientsPage({
                         {patient.channels?.name ?? "—"}
                       </TableCell>
                       <TableCell>
-                        <Badge variant={hasSecondVisit ? "secondary" : "outline"}>
-                          {hasSecondVisit ? "あり" : "なし"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={isContracted ? "secondary" : "outline"}>
-                          {isContracted ? "あり" : "なし"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <details className="text-right">
-                          <summary className="cursor-pointer text-muted-foreground select-none">
-                            編集
-                          </summary>
-                          <form
-                            action={updatePatientWithId}
-                            className="mt-2 flex flex-wrap items-center justify-end gap-2"
+                        <form action={toggleSecondVisitWithId}>
+                          <input type="hidden" name="storeId" value={storeId} />
+                          <input type="hidden" name="month" value={month} />
+                          <input
+                            type="hidden"
+                            name="nextValue"
+                            value={hasSecondVisit ? "" : new Date().toISOString().slice(0, 10)}
+                          />
+                          <button
+                            type="submit"
+                            className="cursor-pointer appearance-none border-0 bg-transparent p-0"
                           >
-                            <input type="hidden" name="storeId" value={storeId} />
-                            <input type="hidden" name="month" value={month} />
-                            <Input
-                              type="date"
-                              name="secondVisitDate"
-                              defaultValue={patient.second_visit_date ?? ""}
-                              className="w-40"
-                            />
-                            <Select
-                              name="contractStatus"
-                              defaultValue={patient.contract_status}
-                              items={CONTRACT_LABEL}
-                            >
-                              <SelectTrigger className="w-28">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {Object.entries(CONTRACT_LABEL).map(([value, label]) => (
-                                  <SelectItem key={value} value={value}>
-                                    {label}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                            <Button type="submit" size="sm" variant="outline">
-                              更新
-                            </Button>
-                            <ConfirmSubmitButton
-                              formAction={deletePatientWithId}
-                              confirmMessage={`「${patient.patient_name}」の記録を削除しますか？この操作は取り消せません。`}
-                              size="sm"
-                              variant="destructive"
-                            >
-                              削除
-                            </ConfirmSubmitButton>
-                          </form>
-                        </details>
+                            <Badge variant={hasSecondVisit ? "secondary" : "outline"}>
+                              {hasSecondVisit ? "来た" : "来てない"}
+                            </Badge>
+                          </button>
+                        </form>
+                      </TableCell>
+                      <TableCell>
+                        <form action={toggleContractStatusWithId}>
+                          <input type="hidden" name="storeId" value={storeId} />
+                          <input type="hidden" name="month" value={month} />
+                          <input
+                            type="hidden"
+                            name="nextStatus"
+                            value={isContracted ? "pending" : "contracted"}
+                          />
+                          <button
+                            type="submit"
+                            className="cursor-pointer appearance-none border-0 bg-transparent p-0"
+                          >
+                            <Badge variant={isContracted ? "secondary" : "outline"}>
+                              {isContracted ? "した" : "してない"}
+                            </Badge>
+                          </button>
+                        </form>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <form action={deletePatientWithId}>
+                          <input type="hidden" name="storeId" value={storeId} />
+                          <input type="hidden" name="month" value={month} />
+                          <ConfirmSubmitButton
+                            confirmMessage={`「${patient.patient_name}」の記録を削除しますか？この操作は取り消せません。`}
+                            size="sm"
+                            variant="destructive"
+                          >
+                            削除
+                          </ConfirmSubmitButton>
+                        </form>
                       </TableCell>
                     </TableRow>
                   );
