@@ -23,3 +23,19 @@ export function resolveMonthParam(param: string | string[] | undefined) {
   const value = Array.isArray(param) ? param[0] : param;
   return value ?? currentMonth();
 }
+
+/** Resolves a from/to month range, defaulting to the current month on both
+ * ends and swapping them if given in the wrong order. "YYYY-MM" strings sort
+ * lexicographically, so plain comparison is enough. */
+export function resolveMonthRangeParams(
+  fromParam: string | string[] | undefined,
+  toParam: string | string[] | undefined,
+) {
+  const now = currentMonth();
+  let from = (Array.isArray(fromParam) ? fromParam[0] : fromParam) ?? now;
+  let to = (Array.isArray(toParam) ? toParam[0] : toParam) ?? now;
+  if (from > to) {
+    [from, to] = [to, from];
+  }
+  return { from, to };
+}

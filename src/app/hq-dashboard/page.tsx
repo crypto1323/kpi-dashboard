@@ -11,14 +11,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { HqScopeSwitcher } from "@/components/hq-scope-switcher";
-import { MonthSwitcher } from "@/components/month-switcher";
+import { MonthRangeSwitcher } from "@/components/month-range-switcher";
 import { InlineTextField } from "@/components/inline-field";
 import { RateBarChart } from "@/components/charts/RateBarChart";
 import { CpaBarChart } from "@/components/charts/CpaBarChart";
 import { StatTile } from "@/components/charts/StatTile";
 import { Meter } from "@/components/charts/Meter";
 import { upsertChannelSpend } from "./actions";
-import { monthStartDate, prevMonthOf, resolveMonthParam } from "@/lib/month";
+import { monthStartDate, prevMonthOf, resolveMonthRangeParams } from "@/lib/month";
 import type {
   ChannelPerformanceRow,
   GenderRollupRow,
@@ -95,7 +95,7 @@ function RollupTable<T extends MetricRow>({
           {!rows.length && (
             <TableRow>
               <TableCell colSpan={4} className="text-center text-muted-foreground">
-                この月の実績はまだありません。
+                この期間の実績はまだありません。
               </TableCell>
             </TableRow>
           )}
@@ -129,6 +129,55 @@ function toChartData<T extends MetricRow>(rows: T[], label: (row: T) => string) 
   }));
 }
 
+// The performance views carry one row per month; a period range returns one row
+// per (entity, month) pair, so these collapse that down to one row per entity
+// with every metric — including 集客費 — summed across the selected months.
+function aggregateChannelRows(rows: ChannelPerformanceRow[]): ChannelPerformanceRow[] {
+  const byChannel = new Map<string, ChannelPerformanceRow>();
+  for (const row of rows) {
+    const existing = byChannel.get(row.channel_id);
+    if (existing) {
+      existing.patient_count += row.patient_count;
+      existing.second_visit_count += row.second_visit_count;
+      existing.contracted_count += row.contracted_count;
+      existing.spend_amount += row.spend_amount;
+    } else {
+      byChannel.set(row.channel_id, { ...row });
+    }
+  }
+  return Array.from(byChannel.values());
+}
+
+function aggregateStaffRows(rows: StaffRollupRow[]): StaffRollupRow[] {
+  const byStaff = new Map<string, StaffRollupRow>();
+  for (const row of rows) {
+    const existing = byStaff.get(row.staff_name);
+    if (existing) {
+      existing.patient_count += row.patient_count;
+      existing.second_visit_count += row.second_visit_count;
+      existing.contracted_count += row.contracted_count;
+    } else {
+      byStaff.set(row.staff_name, { ...row });
+    }
+  }
+  return Array.from(byStaff.values());
+}
+
+function aggregateGenderRows(rows: GenderRollupRow[]): GenderRollupRow[] {
+  const byGender = new Map<string, GenderRollupRow>();
+  for (const row of rows) {
+    const existing = byGender.get(row.gender);
+    if (existing) {
+      existing.patient_count += row.patient_count;
+      existing.second_visit_count += row.second_visit_count;
+      existing.contracted_count += row.contracted_count;
+    } else {
+      byGender.set(row.gender, { ...row });
+    }
+  }
+  return Array.from(byGender.values());
+}
+
 export default async function HqDashboardPage({
   searchParams,
 }: PageProps<"/hq-dashboard">) {
@@ -137,8 +186,13 @@ export default async function HqDashboardPage({
   const supabase = await createClient();
 
   const errorMessage = Array.isArray(params.error) ? params.error[0] : params.error;
-  const month = resolveMonthParam(params.month);
-  const monthStart = monthStartDate(month);
+  const { from, to } = resolveMonthRangeParams(params.from, params.to);
+  const fromStart = monthStartDate(from);
+  const toStart = monthStartDate(to);
+  const periodLabel = from === to ? from : `${from} 〜 ${to}`;
+  // 集客費の入力（マス目編集）は範囲の終端月に対して行う — 合算値のセルは編集できないため。
+  const editMonth = to;
+  const editMonthStart = toStart;
 
   let scope: string;
   let heading = "";
@@ -182,15 +236,21 @@ export default async function HqDashboardPage({
     (isCompany
       ? supabase.from("channel_performance_company").select("*")
       : supabase.from("channel_performance_by_area").select("*").eq("area_id", scope)
-    ).eq("month", monthStart),
+    )
+      .gte("month", fromStart)
+      .lte("month", toStart),
     (isCompany
       ? supabase.from("patient_performance_by_staff_company").select("*")
       : supabase.from("patient_performance_by_staff_area").select("*").eq("area_id", scope)
-    ).eq("month", monthStart),
+    )
+      .gte("month", fromStart)
+      .lte("month", toStart),
     (isCompany
       ? supabase.from("patient_performance_by_gender_company").select("*")
       : supabase.from("patient_performance_by_gender_area").select("*").eq("area_id", scope)
-    ).eq("month", monthStart),
+    )
+      .gte("month", fromStart)
+      .lte("month", toStart),
     isCompany
       ? supabase.from("stores").select("id, code, name").eq("is_active", true).order("code")
       : supabase
@@ -202,13 +262,13 @@ export default async function HqDashboardPage({
     supabase.from("channels").select("id, name").eq("is_active", true).order("sort_order"),
   ]);
 
-  const channelRows = ((channelPerf ?? []) as ChannelPerformanceRow[]).sort(
+  const channelRows = aggregateChannelRows(
+    (channelPerf ?? []) as ChannelPerformanceRow[],
+  ).sort((a, b) => b.patient_count - a.patient_count);
+  const staffRows = aggregateStaffRows((staffPerf ?? []) as StaffRollupRow[]).sort(
     (a, b) => b.patient_count - a.patient_count,
   );
-  const staffRows = ((staffPerf ?? []) as StaffRollupRow[]).sort(
-    (a, b) => b.patient_count - a.patient_count,
-  );
-  const genderRows = ((genderPerf ?? []) as GenderRollupRow[]).sort(
+  const genderRows = aggregateGenderRows((genderPerf ?? []) as GenderRollupRow[]).sort(
     (a, b) => b.patient_count - a.patient_count,
   );
   const storeTotal = sumTotals(channelRows);
@@ -236,13 +296,13 @@ export default async function HqDashboardPage({
   const spendMatrix = new Map<string, Map<string, SpendCellData>>();
 
   if (profile.role === "admin" && spendStoreIds.length) {
-    const prevMonth = prevMonthOf(month);
+    const prevMonth = prevMonthOf(editMonth);
     const [{ data: thisMonthSpends }, { data: lastMonthSpends }] = await Promise.all([
       supabase
         .from("channel_spends")
         .select("store_id, channel_id, amount")
         .in("store_id", spendStoreIds)
-        .eq("period", monthStart),
+        .eq("period", editMonthStart),
       supabase
         .from("channel_spends")
         .select("store_id, channel_id, amount")
@@ -281,7 +341,7 @@ export default async function HqDashboardPage({
         </div>
         <div className="flex items-center gap-3">
           {areaSwitcherProps && <HqScopeSwitcher {...areaSwitcherProps} />}
-          <MonthSwitcher value={month} />
+          <MonthRangeSwitcher from={from} to={to} />
         </div>
       </div>
 
@@ -289,7 +349,7 @@ export default async function HqDashboardPage({
 
       <Card>
         <CardContent>
-          <h2 className="mb-3 text-sm font-medium">サマリー（{month}）</h2>
+          <h2 className="mb-3 text-sm font-medium">サマリー（{periodLabel}）</h2>
           <div className="mb-4 grid grid-cols-3 gap-3">
             <StatTile label="集客数（初診数）" value={`${storeTotal.patient_count}人`} />
             <StatTile
@@ -364,12 +424,15 @@ export default async function HqDashboardPage({
 
       <Card>
         <CardContent>
-          <h2 className="mb-4 text-sm font-medium">集客費・CPA分析（{month}）</h2>
+          <h2 className="mb-1 text-sm font-medium">集客費・CPA分析（{periodLabel}）</h2>
+          <p className="mb-4 text-xs text-muted-foreground">
+            集客費は期間内の合計、CPAは期間合計の集客費 ÷ 期間合計の来店数です。
+          </p>
 
           {profile.role === "admin" && scopeStores && scopeStores.length > 0 && (
             <div className="mb-5 border-b pb-5">
               <p className="mb-3 text-xs text-muted-foreground">
-                未入力のマスは前月の金額を薄い枠で表示します（そのままクリック外せば前月と同額で保存、書き換えれば新しい金額で保存）。横にスクロールすると全店舗、媒体名は常に左端に固定されます。
+                集客費の入力は{editMonth}分を編集しています（複数月の合算値は入力できないため、期間の終端月を編集します）。未入力のマスは前月の金額を薄い枠で表示します（そのままクリック外せば前月と同額で保存、書き換えれば新しい金額で保存）。横にスクロールすると全店舗、媒体名は常に左端に固定されます。
               </p>
               <div className="max-h-[60vh] overflow-auto rounded-lg border">
                 <table className="border-collapse text-sm">
@@ -407,7 +470,9 @@ export default async function HqDashboardPage({
                                 defaultValue={cell?.amount ?? 0}
                                 hidden={{
                                   scope,
-                                  period: month,
+                                  period: editMonth,
+                                  from,
+                                  to,
                                   storeId: store.id,
                                   channelId: channel.id,
                                 }}
@@ -467,7 +532,7 @@ export default async function HqDashboardPage({
                   {!cpaRows.length && (
                     <TableRow>
                       <TableCell colSpan={4} className="text-center text-muted-foreground">
-                        この月のデータがまだありません。
+                        この期間のデータがまだありません。
                       </TableCell>
                     </TableRow>
                   )}
@@ -478,7 +543,7 @@ export default async function HqDashboardPage({
               <CpaBarChart data={cpaChartData} />
             ) : (
               <p className="flex items-center justify-center text-sm text-muted-foreground">
-                この月はまだ来店データがありません。
+                この期間はまだ来店データがありません。
               </p>
             )}
           </div>
