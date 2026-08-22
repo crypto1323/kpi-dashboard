@@ -18,13 +18,17 @@ export function InlineTextField({
   hidden,
   className,
   type = "text",
+  min,
+  step,
 }: {
   action: (formData: FormData) => void;
   name: string;
-  defaultValue: string;
+  defaultValue: string | number;
   hidden: Record<string, string>;
   className?: string;
-  type?: "text" | "date";
+  type?: "text" | "date" | "number";
+  min?: number;
+  step?: number;
 }) {
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -38,6 +42,8 @@ export function InlineTextField({
         name={name}
         defaultValue={defaultValue}
         className={className}
+        min={min}
+        step={step}
         onBlur={() => formRef.current?.requestSubmit()}
         onKeyDown={(event) => {
           if (event.key === "Enter") {

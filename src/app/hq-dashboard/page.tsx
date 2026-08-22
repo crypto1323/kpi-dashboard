@@ -1,10 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { getCurrentProfile } from "@/lib/dal";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import {
   Table,
   TableBody,
@@ -15,8 +11,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { HqScopeSwitcher } from "@/components/hq-scope-switcher";
-import { QueryParamSelect } from "@/components/query-param-select";
 import { MonthSwitcher } from "@/components/month-switcher";
+import { InlineTextField } from "@/components/inline-field";
 import { RateBarChart } from "@/components/charts/RateBarChart";
 import { CpaBarChart } from "@/components/charts/CpaBarChart";
 import { StatTile } from "@/components/charts/StatTile";
@@ -233,50 +229,47 @@ export default async function HqDashboardPage({
     .filter((row): row is typeof row & { cpa: number } => row.cpa !== null)
     .map((row) => ({ label: row.channelName, cpa: row.cpa }));
 
-  // --- 集客費の入力（店舗を選び、前月の金額を初期値として引き継ぐ） ---
-  const requestedSpendStore = Array.isArray(params.spendStoreId)
-    ? params.spendStoreId[0]
-    : params.spendStoreId;
-  const spendStoreId =
-    (scopeStores?.some((store) => store.id === requestedSpendStore) ? requestedSpendStore : null) ??
-    scopeStores?.[0]?.id ??
-    null;
+  // --- 集客費マトリクス（媒体×店舗、前月の金額を初期値として引き継ぐ） ---
+  const spendStoreIds = (scopeStores ?? []).map((store) => store.id);
 
-  let spendRows: {
-    channelId: string;
-    channelName: string;
-    amount: number;
-    isCarriedOver: boolean;
-  }[] = [];
+  type SpendCellData = { amount: number; isCarriedOver: boolean };
+  const spendMatrix = new Map<string, Map<string, SpendCellData>>();
 
-  if (profile.role === "admin" && spendStoreId) {
+  if (profile.role === "admin" && spendStoreIds.length) {
     const prevMonth = prevMonthOf(month);
     const [{ data: thisMonthSpends }, { data: lastMonthSpends }] = await Promise.all([
       supabase
         .from("channel_spends")
-        .select("channel_id, amount")
-        .eq("store_id", spendStoreId)
+        .select("store_id, channel_id, amount")
+        .in("store_id", spendStoreIds)
         .eq("period", monthStart),
       supabase
         .from("channel_spends")
-        .select("channel_id, amount")
-        .eq("store_id", spendStoreId)
+        .select("store_id, channel_id, amount")
+        .in("store_id", spendStoreIds)
         .eq("period", monthStartDate(prevMonth)),
     ]);
 
-    const thisMonthMap = new Map((thisMonthSpends ?? []).map((row) => [row.channel_id, row.amount]));
-    const lastMonthMap = new Map((lastMonthSpends ?? []).map((row) => [row.channel_id, row.amount]));
+    const thisMonthMap = new Map(
+      (thisMonthSpends ?? []).map((row) => [`${row.store_id}:${row.channel_id}`, row.amount]),
+    );
+    const lastMonthMap = new Map(
+      (lastMonthSpends ?? []).map((row) => [`${row.store_id}:${row.channel_id}`, row.amount]),
+    );
 
-    spendRows = (channels ?? []).map((channel) => {
-      const savedThisMonth = thisMonthMap.get(channel.id);
-      const carried = lastMonthMap.get(channel.id);
-      return {
-        channelId: channel.id,
-        channelName: channel.name,
-        amount: savedThisMonth ?? carried ?? 0,
-        isCarriedOver: savedThisMonth === undefined && carried !== undefined,
-      };
-    });
+    for (const store of scopeStores ?? []) {
+      const channelMap = new Map<string, SpendCellData>();
+      for (const channel of channels ?? []) {
+        const key = `${store.id}:${channel.id}`;
+        const savedThisMonth = thisMonthMap.get(key);
+        const carried = lastMonthMap.get(key);
+        channelMap.set(channel.id, {
+          amount: savedThisMonth ?? carried ?? 0,
+          isCarriedOver: savedThisMonth === undefined && carried !== undefined,
+        });
+      }
+      spendMatrix.set(store.id, channelMap);
+    }
   }
 
   return (
@@ -373,51 +366,71 @@ export default async function HqDashboardPage({
         <CardContent>
           <h2 className="mb-4 text-sm font-medium">集客費・CPA分析（{month}）</h2>
 
-          {profile.role === "admin" && spendStoreId && (
+          {profile.role === "admin" && scopeStores && scopeStores.length > 0 && (
             <div className="mb-5 border-b pb-5">
-              <div className="mb-3 flex flex-wrap items-center gap-3">
-                <Label>集客費を入力する店舗</Label>
-                <QueryParamSelect
-                  paramName="spendStoreId"
-                  value={spendStoreId}
-                  items={Object.fromEntries(
-                    (scopeStores ?? []).map((store) => [store.id, `${store.code} ${store.name}`]),
-                  )}
-                />
-                <p className="text-xs text-muted-foreground">
-                  未入力の媒体には前月の金額を自動で表示します。そのまま保存すれば前月と同額、書き換えれば新しい金額で保存されます。
-                </p>
-              </div>
-              <div className="flex flex-col gap-2">
-                {spendRows.map((row) => (
-                  <form
-                    key={row.channelId}
-                    action={upsertChannelSpend}
-                    className="flex flex-wrap items-center gap-2"
-                  >
-                    <input type="hidden" name="scope" value={scope} />
-                    <input type="hidden" name="period" value={month} />
-                    <input type="hidden" name="storeId" value={spendStoreId} />
-                    <input type="hidden" name="channelId" value={row.channelId} />
-                    <span className="w-28 text-sm font-medium">{row.channelName}</span>
-                    <span>¥</span>
-                    <Input
-                      type="number"
-                      name="amount"
-                      min={0}
-                      step={1000}
-                      defaultValue={row.amount}
-                      className="w-32"
-                    />
-                    {row.isCarriedOver && <Badge variant="outline">前月から引継ぎ</Badge>}
-                    <Button type="submit" size="sm" variant="outline">
-                      保存
-                    </Button>
-                  </form>
-                ))}
-                {!spendRows.length && (
-                  <p className="text-sm text-muted-foreground">媒体が未登録です。</p>
-                )}
+              <p className="mb-3 text-xs text-muted-foreground">
+                未入力のマスは前月の金額を薄い枠で表示します（そのままクリック外せば前月と同額で保存、書き換えれば新しい金額で保存）。横にスクロールすると全店舗、媒体名は常に左端に固定されます。
+              </p>
+              <div className="max-h-[60vh] overflow-auto rounded-lg border">
+                <table className="border-collapse text-sm">
+                  <thead>
+                    <tr>
+                      <th className="sticky top-0 left-0 z-20 min-w-32 border-b border-r bg-muted px-3 py-2 text-left font-medium whitespace-nowrap">
+                        流入媒体
+                      </th>
+                      {scopeStores.map((store) => (
+                        <th
+                          key={store.id}
+                          className="sticky top-0 z-10 min-w-32 border-b bg-muted px-3 py-2 text-left font-medium whitespace-nowrap"
+                        >
+                          {store.code} {store.name}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(channels ?? []).map((channel) => (
+                      <tr key={channel.id}>
+                        <td className="sticky left-0 z-10 border-r bg-background px-3 py-1.5 font-medium whitespace-nowrap">
+                          {channel.name}
+                        </td>
+                        {scopeStores.map((store) => {
+                          const cell = spendMatrix.get(store.id)?.get(channel.id);
+                          return (
+                            <td key={store.id} className="border-t px-2 py-1.5">
+                              <InlineTextField
+                                action={upsertChannelSpend}
+                                name="amount"
+                                type="number"
+                                min={0}
+                                step={1000}
+                                defaultValue={cell?.amount ?? 0}
+                                hidden={{
+                                  scope,
+                                  period: month,
+                                  storeId: store.id,
+                                  channelId: channel.id,
+                                }}
+                                className={`h-8 w-24 text-right ${
+                                  cell?.isCarriedOver
+                                    ? "border-dashed text-muted-foreground"
+                                    : ""
+                                }`}
+                              />
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                    {!channels?.length && (
+                      <tr>
+                        <td className="px-3 py-4 text-center text-muted-foreground">
+                          媒体が未登録です。
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
