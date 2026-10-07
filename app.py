@@ -580,14 +580,65 @@ def shared_lock() -> threading.Lock:
     return threading.Lock()
 
 
-def supabase_settings() -> tuple[str, str] | None:
+def _secrets_dict() -> dict:
     try:
-        conf = st.secrets.get("supabase")
-    except Exception:  # noqa: BLE001
-        return None
-    if not conf or not conf.get("url") or not conf.get("key"):
-        return None
-    return str(conf["url"]).strip(), str(conf["key"]).strip()
+        return st.secrets.to_dict()
+    except Exception:  # noqa: BLE001  secrets が無い・書式が不正
+        return {}
+
+
+def _pick(section: dict, *names: str) -> str | None:
+    """大文字・小文字の違いを無視して、最初に見つかった値を返す。"""
+    lowered = {str(k).lower(): v for k, v in section.items()}
+    for n in names:
+        v = lowered.get(n.lower())
+        if v:
+            return str(v).strip()
+    return None
+
+
+def supabase_settings() -> tuple[str, str] | None:
+    """Supabase の接続情報。次のどの書き方でも読み取る。
+    [supabase] url / key（推奨）、[supabase] SUPABASE_URL / SUPABASE_KEY、[connections.supabase] …、最上位の SUPABASE_URL / SUPABASE_KEY
+    """
+    secrets = _secrets_dict()
+    sections = [
+        {str(k).lower(): v for k, v in secrets.items()}.get("supabase"),
+        (secrets.get("connections") or {}).get("supabase") if isinstance(secrets.get("connections"), dict) else None,
+        secrets,
+    ]
+    for sec in sections:
+        if isinstance(sec, dict):
+            url = _pick(sec, "url", "supabase_url", "project_url")
+            key = _pick(sec, "key", "supabase_key", "secret_key", "service_role_key")
+            if url and key:
+                return url, key
+    return None
+
+
+def supabase_diagnosis() -> list[str]:
+    """Supabase につながらない理由のヒント（値そのものは表示せず、項目名だけを見る）。"""
+    secrets = _secrets_dict()
+    if not secrets:
+        return ["Secrets が空か、書式の誤りで読み込めていません。"]
+    hints = [f"Secrets に見つかった項目名：{', '.join(sorted(map(str, secrets))) or 'なし'}"]
+    sec = {str(k).lower(): v for k, v in secrets.items()}.get("supabase")
+    if sec is None:
+        hints.append("「[supabase]」という見出しの行がありません（先頭に # が付いていないか、つづりが正しいか確認してください）。")
+    elif not isinstance(sec, dict):
+        hints.append("「supabase」が見出し（[supabase]）ではなく、1行の値として書かれています。")
+    else:
+        names = ", ".join(map(str, sec)) or "なし"
+        hints.append(f"[supabase] の中の項目名：{names}（url と key の2つが必要です）")
+        if not _pick(sec, "url", "supabase_url", "project_url"):
+            hints.append("url が空、または項目名が違います。")
+        if not _pick(sec, "key", "supabase_key", "secret_key", "service_role_key"):
+            hints.append("key が空、または項目名が違います。")
+    return hints
+
+
+def running_on_streamlit_cloud() -> bool:
+    return str(BASE_DIR).startswith("/mount/src")
 
 
 @st.cache_resource(show_spinner=False)
@@ -1172,6 +1223,14 @@ with st.sidebar:
                 ss.upload_ver += 1
                 st.rerun()
     st.caption(f"保存先：{BACKEND}（30秒ごとに他の人の更新を確認）")
+    if not supabase_settings():
+        with st.expander("🔌 データベースの接続を確認", expanded=running_on_streamlit_cloud()):
+            if running_on_streamlit_cloud():
+                st.error("クラウド上でデータベースに接続していないため、保存したデータは再起動で消えます。", icon="⚠️")
+            for hint in supabase_diagnosis():
+                st.caption("・" + hint)
+            st.caption("Secrets には次の形で書いてください。")
+            st.code('[supabase]\nurl = "https://xxxx.supabase.co"\nkey = "sb_secret_xxxx"', language="toml")
 
 if using_sample:
     for name, raw in sample_files(today, 2):
