@@ -616,31 +616,6 @@ def supabase_settings() -> tuple[str, str] | None:
     return None
 
 
-def supabase_diagnosis() -> list[str]:
-    """Supabase につながらない理由のヒント（値そのものは表示せず、項目名だけを見る）。"""
-    secrets = _secrets_dict()
-    if not secrets:
-        return ["Secrets が空か、書式の誤りで読み込めていません。"]
-    hints = [f"Secrets に見つかった項目名：{', '.join(sorted(map(str, secrets))) or 'なし'}"]
-    sec = {str(k).lower(): v for k, v in secrets.items()}.get("supabase")
-    if sec is None:
-        hints.append("「[supabase]」という見出しの行がありません（先頭に # が付いていないか、つづりが正しいか確認してください）。")
-    elif not isinstance(sec, dict):
-        hints.append("「supabase」が見出し（[supabase]）ではなく、1行の値として書かれています。")
-    else:
-        names = ", ".join(map(str, sec)) or "なし"
-        hints.append(f"[supabase] の中の項目名：{names}（url と key の2つが必要です）")
-        if not _pick(sec, "url", "supabase_url", "project_url"):
-            hints.append("url が空、または項目名が違います。")
-        if not _pick(sec, "key", "supabase_key", "secret_key", "service_role_key"):
-            hints.append("key が空、または項目名が違います。")
-    return hints
-
-
-def running_on_streamlit_cloud() -> bool:
-    return str(BASE_DIR).startswith("/mount/src")
-
-
 @st.cache_resource(show_spinner=False)
 def supabase_client(url: str, key: str):
     from supabase import create_client
@@ -1071,10 +1046,7 @@ def require_login() -> None:
         st.markdown("<div class='page-meta'>パスワードを入力してログインしてください。</div>", unsafe_allow_html=True)
         password = configured_password()
         if password is None:
-            st.error(
-                "パスワードが設定されていません。アプリのフォルダに `.streamlit/secrets.toml` を作成し、"
-                '`admin_password = "（パスワード）"` を書き込んでから、ページを再読み込みしてください。'
-            )
+            st.error("現在ログインできません。管理者にご連絡ください。")
             st.stop()
         with st.form("login_form", border=True):
             entered = st.text_input("パスワード", type="password", placeholder="パスワード")
@@ -1097,7 +1069,6 @@ today = date.today()
 ss = st.session_state
 ss.setdefault("target_ver", 0)
 ss.setdefault("upload_ver", 0)
-BACKEND = "Supabase（クラウドのデータベース）" if supabase_settings() else "このPCのファイル（data フォルダ）"
 
 
 @st.cache_data(show_spinner=False)
@@ -1112,12 +1083,8 @@ try:
     shared_targets = store_get("targets")
     config = store_get("config")
     report_rows = cached_report_rows(ss.data_sig)
-except Exception as e:  # noqa: BLE001
-    st.error(
-        f"**データベースに接続できませんでした。**（{type(e).__name__}: {str(e)[:200]}）\n\n"
-        "- `.streamlit/secrets.toml`（クラウドでは Secrets 設定）の `[supabase]` の `url` と `key` が正しいか確認してください。\n"
-        "- Supabase の SQL Editor で `supabase_setup.sql` を実行して、テーブルを作成済みか確認してください。"
-    )
+except Exception:  # noqa: BLE001
+    st.error("現在、データを読み込めません。しばらくしてからページを再読み込みしてください。解決しない場合は管理者にご連絡ください。")
     st.stop()
 ss.kpi_targets = dict(shared_targets.get("kpi", DEFAULT_TARGETS))     # 一度も保存されていなければ初期値
 ss.menu_targets = dict(shared_targets.get("menu_sales", {}))           # メニュー別 売上目標
@@ -1222,15 +1189,6 @@ with st.sidebar:
                 delete_report_rows([labels[x] for x in to_delete])
                 ss.upload_ver += 1
                 st.rerun()
-    st.caption(f"保存先：{BACKEND}（30秒ごとに他の人の更新を確認）")
-    if not supabase_settings():
-        with st.expander("🔌 データベースの接続を確認", expanded=running_on_streamlit_cloud()):
-            if running_on_streamlit_cloud():
-                st.error("クラウド上でデータベースに接続していないため、保存したデータは再起動で消えます。", icon="⚠️")
-            for hint in supabase_diagnosis():
-                st.caption("・" + hint)
-            st.caption("Secrets には次の形で書いてください。")
-            st.code('[supabase]\nurl = "https://xxxx.supabase.co"\nkey = "sb_secret_xxxx"', language="toml")
 
 if using_sample:
     for name, raw in sample_files(today, 2):
