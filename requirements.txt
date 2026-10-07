@@ -1,0 +1,7 @@
+streamlit>=1.50
+pandas>=2.0
+numpy
+altair>=5.0
+openpyxl>=3.1   # .xlsx の読み込み
+xlrd>=2.0       # .xls の読み込み（CRM の月間報告書）
+supabase>=2.0   # クラウドのデータベース（Supabase）への保存
