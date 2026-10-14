@@ -888,8 +888,8 @@ CSS = """
 .panel .row:first-of-type {border-top:none;}
 .panel .muted {opacity:.6; font-size:.8rem;}
 .mt-wrap {overflow-x:auto;}
-.mt {min-width:1020px; border:1px solid rgba(128,128,128,.18); border-radius:10px; overflow:hidden;}
-.mt-row {display:grid; grid-template-columns:minmax(210px,1fr) 62px 72px 118px 108px 104px 128px 64px; gap:10px;
+.mt {min-width:900px; border:1px solid rgba(128,128,128,.18); border-radius:10px; overflow:hidden;}
+.mt-row {display:grid; grid-template-columns:minmax(200px,1fr) 64px 76px 128px 110px 108px 132px; gap:10px;
   align-items:center; padding:9px 14px; font-size:.82rem;}
 .mt-row > span:nth-child(5) {border-left:1px solid rgba(128,128,128,.18); padding-left:10px;}
 .mt-row .gap {display:block; font-size:.68rem; font-weight:600; margin-top:1px;}
@@ -910,7 +910,7 @@ details[open] .caret {transform:rotate(90deg);}
 .mini {display:inline-flex; align-items:center; gap:6px; justify-content:flex-end; width:100%;}
 .mini .track {flex:1; max-width:80px; height:4px; border-radius:2px; background:rgba(128,128,128,.2); overflow:hidden;}
 .mini .track > div {height:100%;}
-.up {color:#2e7d32;} .down {color:#c62828;}
+.trial {font-size:.66rem; font-weight:600; margin-left:6px; padding:1px 6px; border-radius:999px; background:rgba(239,108,0,.12); color:#ef6c00;}
 </style>
 """
 
@@ -956,66 +956,110 @@ def list_panel(title: str, rows: pd.DataFrame, color: str, empty: str) -> str:
     return f"<div class='panel'><h4>{title}</h4>{body}</div>"
 
 
+def is_trial_menu(name: str) -> bool:
+    """「特別診療体験」「鍼体験」など、体験メニューかどうか。"""
+    return "体験" in unicodedata.normalize("NFKC", str(name))
+
+
+def progress_html(actual, target, unit: str, ratio: float) -> str:
+    """進捗バーと進捗率、その下に「あと◯」（達成なら超過分）。目標が無ければ「—」。"""
+    if not target:
+        return "<span style='opacity:.35'>—</span>"
+    res = judge(actual, target, True, SUM, ratio)
+    color = STATUS_STYLE[res["status"]][0]
+    gap = target - actual
+    gap_txt = f"あと {fmt(gap, unit)}" if gap > 0 else ("達成" if gap == 0 else f"達成 +{fmt(-gap, unit)}")
+    return (
+        f"<span class='mini'><span class='track'><div style='width:{min(res['progress'], 100):.0f}%;background:{color}'></div>"
+        f"</span>{res['progress']:.0f}%</span><span class='gap' style='color:{color}'>{gap_txt}</span>"
+    )
+
+
 def menu_tree_html(tree: list[dict], ratio: float, total: float, open_top: int = 3) -> str:
-    """親メニュー（合計）の行の下に内訳の行がぶら下がる表。件数と売上の両方の進捗を表示する。"""
+    """親メニュー（合計）の行の下に内訳の行がぶら下がる表。
+    件数は内訳ごとに管理するため、親メニュー（合計）の行には件数・件数目標・件数の進捗を出さない。"""
     DASH = "<span style='opacity:.35'>—</span>"
 
-    def status_of(actual, target):
-        return judge(actual, target, True, SUM, ratio)["status"] if target else ST_NOTARGET
-
-    def progress(actual, target, unit):
-        """進捗バーと進捗率、その下に「あと◯」（達成なら超過分）。"""
-        if not target:
-            return DASH
-        res = judge(actual, target, True, SUM, ratio)
-        color = STATUS_STYLE[res["status"]][0]
-        gap = target - actual
-        gap_txt = f"あと {fmt(gap, unit)}" if gap > 0 else f"達成 +{fmt(-gap, unit)}"
-        return (
-            f"<span class='mini'><span class='track'><div style='width:{min(res['progress'], 100):.0f}%;background:{color}'></div>"
-            f"</span>{res['progress']:.0f}%</span><span class='gap' style='color:{color}'>{gap_txt}</span>"
-        )
-
-    def mom(actual, prev):
-        if pd.isna(prev) or not prev:
-            return DASH
-        r = actual / prev * 100
-        return f"<span class='{'up' if r >= 100 else 'down'}'>{r:.0f}%</span>"
-
-    def dot(row):
-        status = status_of(row["売上"], row["目標"]) if row["目標"] else status_of(row["人数"], row["件数目標"])
+    def dot(row, show_count: bool):
+        if row["目標"]:
+            status = judge(row["売上"], row["目標"], True, SUM, ratio)["status"]
+        elif show_count and row["件数目標"]:
+            status = judge(row["人数"], row["件数目標"], True, SUM, ratio)["status"]
+        else:
+            status = ST_NOTARGET
         return f"<span class='dot' style='background:{STATUS_STYLE[status][0]}'></span>"
 
-    def cells(row, name_html):
+    def cells(row, name_html, show_count: bool = True):
         share = row["売上"] / total * 100 if total else 0
+        if show_count:
+            count_cells = (
+                f"<span>{fmt(row['人数'], '件')}</span>"
+                f"<span>{fmt(row['件数目標'], '件') if row['件数目標'] else DASH}</span>"
+                f"<span>{progress_html(row['人数'], row['件数目標'], '件', ratio)}</span>"
+            )
+        else:
+            count_cells = f"<span>{DASH}</span><span>{DASH}</span><span>{DASH}</span>"
         return (
-            f"<span>{name_html}</span>"
-            f"<span>{fmt(row['人数'], '件')}</span>"
-            f"<span>{fmt(row['件数目標'], '件') if row['件数目標'] else DASH}</span>"
-            f"<span>{progress(row['人数'], row['件数目標'], '件')}</span>"
+            f"<span>{name_html}</span>{count_cells}"
             f"<span class='amt' title='構成比 {share:.1f}%'>{fmt(row['売上'], '円')}</span>"
             f"<span>{fmt(row['目標'], '円') if row['目標'] else DASH}</span>"
-            f"<span>{progress(row['売上'], row['目標'], '円')}</span>"
-            f"<span>{mom(row['売上'], row['前月'])}</span>"
+            f"<span>{progress_html(row['売上'], row['目標'], '円', ratio)}</span>"
         )
+
+    def child_name(m):
+        tag = "<span class='trial'>体験</span>" if is_trial_menu(m["name"]) else ""
+        return f"{html.escape(m['name'])}{tag}"
 
     head = (
         "<div class='mt-row mt-hd'><span>メニュー（親）／内訳</span>"
         "<span>件数</span><span>件数目標</span><span>件数の進捗</span>"
-        "<span>売上</span><span>売上目標</span><span>売上の進捗</span><span>売上前月比</span></div>"
+        "<span>売上</span><span>売上目標</span><span>売上の進捗</span></div>"
     )
     body = []
     for i, g in enumerate(tree):
-        caret = "<span class='caret'>▸</span>" if g["multi"] else "<span class='caret'></span>"
-        count = f"<span class='cnt'>{len(g['members'])}項目</span>" if g["multi"] else ""
-        name = f"{caret}{dot(g)}&nbsp;{html.escape(g['group'])}{' 全体' if g['multi'] else ''}{count}"
-        parent = cells(g, name)
-        if not g["multi"]:
-            body.append(f"<div class='mt-group'><div class='mt-row mt-parent'>{parent}</div></div>")
+        if not g["multi"]:  # 内訳の無い単独メニューは、その分類自体の件数をそのまま表示する
+            m = g["members"][0]
+            name = f"<span class='caret'></span>{dot(g, True)}&nbsp;{child_name(m)}"
+            body.append(f"<div class='mt-group'><div class='mt-row mt-parent'>{cells(g, name)}</div></div>")
             continue
-        kids = "".join(f"<div class='mt-row mt-child'>{cells(m, html.escape(m['name']))}</div>" for m in g["members"])
+        count = f"<span class='cnt'>{len(g['members'])}項目</span>"
+        name = f"<span class='caret'>▸</span>{dot(g, False)}&nbsp;{html.escape(g['group'])} 全体{count}"
+        parent = cells(g, name, show_count=False)
+        kids = "".join(f"<div class='mt-row mt-child'>{cells(m, child_name(m))}</div>" for m in g["members"])
         body.append(f"<details class='mt-group'{' open' if i < open_top else ''}><summary class='mt-row mt-parent'>{parent}</summary>{kids}</details>")
     return f"<div class='mt-wrap'><div class='mt'>{head}{''.join(body)}</div></div>"
+
+
+def trial_cards_html(tree: list[dict], ratio: float) -> str:
+    """体験メニューごとの件数の進捗カード。"""
+    cards = []
+    for g in tree:
+        for m in g["members"]:
+            if not is_trial_menu(m["name"]):
+                continue
+            target = m["件数目標"]
+            if target:
+                res = judge(m["人数"], target, True, SUM, ratio)
+                color = STATUS_STYLE[res["status"]][0]
+                gap = target - m["人数"]
+                gap_txt = f"あと {fmt(gap, '件')}" if gap > 0 else ("達成" if gap == 0 else f"達成 +{fmt(-gap, '件')}")
+                width = min(res["progress"], 100)
+                pace = f"<div class='pace' style='left:{ratio * 100:.1f}%'></div>" if 0 < ratio < 1 else ""
+                meta = f"<span>目標 {fmt(target, '件')}</span><span>{res['progress']:.0f}%</span>"
+                gap_html = f"<div class='kpi-gap' style='color:{color}'>{gap_txt}</div>"
+            else:
+                color, width, pace = STATUS_STYLE[ST_NOTARGET][0], 0, ""
+                meta = "<span>件数目標を「目標設定」で入力</span><span></span>"
+                gap_html = "<div class='kpi-gap' style='opacity:.5'>目標未設定</div>"
+            cards.append(
+                f"<div class='kpi-card small'>"
+                f"<div class='kpi-head'><span class='dot' style='background:{color}'></span>{html.escape(m['name'])}"
+                f"<span class='cnt'>{html.escape(g['group'])}</span></div>"
+                f"<div class='kpi-value'>{fmt(m['人数'], '件')}</div>{gap_html}"
+                f"<div class='kpi-bar'><div class='fill' style='width:{width:.1f}%;background:{color}'></div>{pace}</div>"
+                f"<div class='kpi-meta'>{meta}</div></div>"
+            )
+    return "<div class='kpi-grid'>" + "".join(cards) + "</div>" if cards else ""
 
 
 # ===========================================================================
@@ -1361,7 +1405,8 @@ def menu_tree() -> list[dict]:
                 "前月": sum(prevs) if prevs else np.nan,
                 "前月件数": sum(prev_counts) if prev_counts else np.nan,
                 "目標": resolve_group_target(ss.menu_targets, group, members, "目標", multi),
-                "件数目標": resolve_group_target(ss.menu_count_targets, group, members, "件数目標", multi),
+                # 件数は内訳ごとに管理する（親メニューの合算はしない）。単独メニューはその分類の件数目標
+                "件数目標": None if multi else members[0]["件数目標"],
             }
         )
     tree.sort(key=lambda g: (-g["売上"], -g["人数"], g["group"]))
@@ -1531,13 +1576,19 @@ def page_dashboard():
         idle = [g for g in tree if not is_active(g)]
         st.markdown(menu_tree_html(active, ratio, total), unsafe_allow_html=True)
         st.caption(
-            "親メニューの行は内訳（新規・継続の回数券、体験、声掛けなど）の合計で、行をタップすると内訳を開閉できます。"
-            "件数・売上それぞれに、目標に対する進捗率と「あと◯件／あと◯円」を表示しています。"
-            "パイオネックス・お灸は「鍼」に含めています。目標とグループ分けは「目標設定」ページで変更できます。"
+            "親メニューの行は内訳（新規・継続の回数券、体験、声掛けなど）の売上合計で、行をタップすると内訳を開閉できます。"
+            "件数は内訳ごとに目標と進捗を表示しています。パイオネックス・お灸は「鍼」に含めています。"
+            "目標とグループ分けは「目標設定」ページで変更できます。"
         )
         if idle:
             with st.expander(f"今月の実績が無いメニュー（{len(idle)}件）"):
                 st.markdown(menu_tree_html(idle, ratio, total, open_top=0), unsafe_allow_html=True)
+
+        trial_html = trial_cards_html(tree, ratio)
+        if trial_html:
+            st.markdown("**体験メニューの進捗（件数）**")
+            st.markdown(trial_html, unsafe_allow_html=True)
+            st.caption("体験メニューごとに、件数目標に対する進捗率と「あと◯件」を表示しています。バーの縦線は本日時点で到達しているべき位置です。")
 
     # ---- 推移 ----
     section("月別の推移")
@@ -1643,8 +1694,10 @@ def page_targets():
     MENU_COLS = ["_key", "_group", "_前月件数", "_前月売上", "階層", "メニュー", "今月件数", "件数目標", "今月売上", "売上目標"]
 
     def menu_row(key, group, level, label, row):
-        return {"_key": key, "_group": group, "_前月件数": row["前月件数"], "_前月売上": row["前月"], "階層": level, "メニュー": label,
-                "今月件数": row["人数"], "件数目標": row["件数目標"], "今月売上": row["売上"], "売上目標": row["目標"]}
+        parent = level == "親（合計）"  # 親メニューの件数は扱わない（空欄）
+        return {"_key": key, "_group": group, "_前月件数": None if parent else row["前月件数"], "_前月売上": row["前月"],
+                "階層": level, "メニュー": label, "今月件数": None if parent else row["人数"],
+                "件数目標": None if parent else row["件数目標"], "今月売上": row["売上"], "売上目標": row["目標"]}
 
     menu_rows = []
     for g in menu_tree():
@@ -1652,7 +1705,8 @@ def page_targets():
             # 親の目標：親に直接入れた値、無ければ内訳の目標の合計
             menu_rows.append(menu_row(GROUP_KEY + g["group"], g["group"], "親（合計）", f"■ {g['group']} 全体", g))
             for m in g["members"]:
-                menu_rows.append(menu_row(m["name"], g["group"], "内訳", f"　　└ {m['name']}", m))
+                label = f"　　└ {m['name']}" + ("　🔰体験" if is_trial_menu(m["name"]) else "")
+                menu_rows.append(menu_row(m["name"], g["group"], "内訳", label, m))
         else:
             m = g["members"][0]
             menu_rows.append(menu_row(m["name"], g["group"], "単独", f"■ {m['name']}", m))
@@ -1683,7 +1737,8 @@ def page_targets():
             "<div class='page-meta' style='margin:-4px 0 10px'>"
             "・<b>内訳に入れる</b> → 親メニューの目標は、内訳の目標の合計に自動でなります（保存すると更新）<br>"
             "・<b>親メニューに入れる</b> → グループ全体の目標になります。内訳の合計より優先されます<br>"
-            "・親メニューを<b>空欄にして保存</b>すると、内訳の合計に戻ります（件数・売上それぞれ別に判定します）</div>",
+            "・親メニューを<b>空欄にして保存</b>すると、内訳の合計に戻ります<br>"
+            "・<b>件数目標は内訳・単独メニューの行に入力します</b>（親メニューの行の件数は使いません）。🔰体験 の行に入れると、ダッシュボードに体験メニューの進捗が表示されます</div>",
             unsafe_allow_html=True,
         )
         menu_edit = st.data_editor(
@@ -1721,13 +1776,13 @@ def page_targets():
         new_kpi.update({k: v for k, v in ss.kpi_targets.items() if k not in set(kpi_edit["項目"])})  # 表に無い項目の目標は残す
         shown_keys = set(menu_edit["_key"])
 
-        def collect(column: str, old: dict) -> dict:
+        def collect(column: str, old: dict, parents: bool = True) -> dict:
             new = {k: v for k, v in old.items() if k not in shown_keys}  # 表示していないメニュー（他院など）の目標は残す
             for _, r in menu_edit[leaf].iterrows():
                 if not pd.isna(r[column]) and r[column] > 0:
                     new[r["_key"]] = float(r[column])
             # 親の目標は、内訳の合計と違う値が入っているときだけ「親の目標」として保存する（同じなら内訳の合計に自動で連動）
-            for _, r in menu_edit[~leaf].iterrows():
+            for _, r in (menu_edit[~leaf] if parents else menu_edit.iloc[0:0]).iterrows():
                 kids_sum = float(menu_edit[leaf & (menu_edit["_group"] == r["_group"])]["_key"].map(new).fillna(0).sum())
                 v = r[column]
                 if not pd.isna(v) and v > 0 and abs(v - kids_sum) > 0.5:
@@ -1735,7 +1790,7 @@ def page_targets():
             return new
 
         new_sales = collect("売上目標", ss.menu_targets)
-        new_count = collect("件数目標", ss.menu_count_targets)
+        new_count = collect("件数目標", ss.menu_count_targets, parents=False)  # 件数は親メニューに保存しない
         # 共有データ（Supabase または data/targets.json）へ保存：この画面で変更した目標だけを、最新の内容に重ねて保存する
         apply_diff("targets", "kpi", ss.kpi_targets, new_kpi)
         apply_diff("targets", "menu_sales", ss.menu_targets, new_sales)

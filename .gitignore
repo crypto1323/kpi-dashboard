@@ -1,0 +1,13 @@
+# パスワード・データベースの接続情報（絶対に GitHub に上げない）
+.streamlit/
+.streamlit/secrets.toml
+
+# このPCに保存されたデータ（院の実績・目標）
+data/
+uploads/
+.dashboard_state/
+sample_reports/
+
+# Python のキャッシュ
+__pycache__/
+*.pyc
