@@ -95,7 +95,9 @@ CATALOG: list[dict] = _sales_items() + [
      "lookups": [("cross", "窓口売上", None, "全体", "窓口金単価"), ("cross", "全体1", "窓口売上", "全体", "窓口金単価")]},
     {"name": "自費単価", "category": "単価・平均", "unit": "円", "agg": MEAN,
      "lookups": [("cross", "窓口売上", None, "全体", "自費単価"), ("cross", "全体1", "窓口売上", "全体", "自費単価")]},
+    # 単価＝報告書の「全体単価」。保存済みデータに無い場合は 窓口売上合計 ÷ 延べ来院数（切り捨て）で計算する（報告書の値と一致）
     {"name": "全体平均単価", "category": "単価・平均", "unit": "円", "agg": MEAN,
+     "ratio_of": ("窓口売上合計", "延べ来院数"), "ratio_scale": 1, "ratio_floor": True,
      "lookups": [("cross", "窓口売上", None, "全体", "全体単価"), ("cross", "全体1", "窓口売上", "全体", "全体単価")]},
     # 患者数
     {"name": "延べ来院数", "category": "患者数", "unit": "人", "agg": SUM,
@@ -112,9 +114,6 @@ CATALOG: list[dict] = _sales_items() + [
      "lookups": [("cross", "来院人数", None, "午前", "人数"), ("cross", "全体1", "来院人数", "午前", "人数")]},
     {"name": "午後来院数", "category": "患者数", "unit": "人", "agg": SUM,
      "lookups": [("cross", "来院人数", None, "午後", "人数"), ("cross", "全体1", "来院人数", "午後", "人数")]},
-    # カルテ総数＝累計登録患者数（報告書の出力時点の累計）。日割りせず目標と比べ、複数院は合計する
-    {"name": "カルテ総数", "category": "患者数", "unit": "件", "agg": MEAN, "combine": SUM,
-     "lookups": [("right", "全体1", "累計登録患者数", "人数", None)]},
     # 離反率の計算に使う内訳（離反者＝前月来院して当月来院しなかった人、前月の純患者数）
     {"name": "離反者数", "category": "患者数", "unit": "人", "agg": MEAN, "combine": SUM,
      "lookups": [("cross", "純患者数", None, "離反者(前月)", "当月"), ("cross", "全体1", "純患者数(内訳)", "離反者(前月)", "当月")]},
@@ -149,13 +148,13 @@ CATEGORY_ORDER = ["窓口売上", "患者数", "初診率・継続率", "単価�
 HEADLINE_KPIS = [
     ("窓口売上合計", "合計売上"),
     ("初診率（新患1→2回目）", "初診率"),
-    ("カルテ総数", "カルテ総数"),
+    ("純患者数", "カルテ総数"),          # カルテ総数＝報告書の「純患者数」
     ("新患数", "新患数"),
     ("再診数", "再診数"),
     ("離反率", "離反率"),
     ("1日平均来院数", "平均人数（1日）"),
     ("平均通院回数", "平均通院回数"),
-    ("全体平均単価", "全体平均単価"),
+    ("全体平均単価", "単価"),            # 単価＝報告書の「全体単価」
 ]
 HEADLINE_ITEMS = [name for name, _ in HEADLINE_KPIS]
 
@@ -422,6 +421,12 @@ def detect_clinic(grids, cells_by_sheet, filename: str) -> str:
 # ---------------------------------------------------------------------------
 # 1ファイル分の抽出
 # ---------------------------------------------------------------------------
+def ratio_value(spec: dict, numerator: float, denominator: float) -> float:
+    """計算項目の値（離反率は ×100 の%、単価は割り算して切り捨て）。"""
+    value = numerator / denominator * spec.get("ratio_scale", 100)
+    return float(int(value)) if spec.get("ratio_floor") else value
+
+
 def build_catalog(custom: tuple) -> list[dict]:
     catalog = [dict(x) for x in CATALOG]
     for name, unit, agg, sheet, anchor, row, col, pct in custom:
@@ -467,10 +472,10 @@ def extract_file(raw: bytes, filename: str, custom: tuple, catalog_sig: str) -> 
         else:
             values[spec["name"]] = {"value": 0.0, "found": False, "where": ""}
     for spec in build_catalog(custom):  # 他の項目から計算する項目（例：離反率＝離反者数÷前月純患者数）
-        if spec.get("ratio_of"):
+        if spec.get("ratio_of") and not values[spec["name"]]["found"]:  # 報告書から直接取れた値があればそれを優先
             num, den = (values.get(n, {"found": False}) for n in spec["ratio_of"])
             if num["found"] and den["found"] and den["value"]:
-                values[spec["name"]] = {"value": num["value"] / den["value"] * 100, "found": True,
+                values[spec["name"]] = {"value": ratio_value(spec, num["value"], den["value"]), "found": True,
                                         "where": f"{num['where']} ÷ {den['where']}"}
     return {
         "values": values,
@@ -901,7 +906,7 @@ def fmt(v, unit: str = "") -> str:
 def fmt_signed(v, unit: str = "") -> str:
     if v is None or pd.isna(v):
         return "—"
-    return ("+" if v >= 0 else "−") + fmt(abs(v), "ポイント" if unit == "%" else unit)
+    return ("+" if v >= 0 else "−") + fmt(abs(v), unit)
 
 
 # ---------------------------------------------------------------------------
@@ -973,7 +978,7 @@ def section(title: str, note: str = "") -> None:
 
 
 def gap_text(row: pd.Series) -> str:
-    unit = "ポイント" if row["単位"] == "%" else row["単位"]
+    unit = row["単位"]
     gap = row["目標"] - row["現状"]
     if row.get("低いほど良い"):
         return f"あと {fmt(-gap, unit)} 下げる" if gap < 0 else "達成"
@@ -1355,11 +1360,12 @@ def aggregate_values(reps: list[dict]) -> dict[str, tuple[float, bool, str]]:
             value = float(np.mean([v["value"] for v in found])) if found else 0.0
         where = found[0]["where"] if len(reps) == 1 and found else ("" if not found else f"{len(found)}/{len(reps)}院で取得")
         out[spec["name"]] = (value, bool(found), where)
-    for spec in catalog:  # 割合の項目は、院ごとの割合の平均ではなく「合計どうしの割合」にする
-        if spec.get("ratio_of") and len(reps) > 1:
+    for spec in catalog:
+        # 割合・単価の項目：複数院は「合計どうしの割合」。保存済みデータに値が無い場合も、元になる項目から計算する
+        if spec.get("ratio_of") and (len(reps) > 1 or not out[spec["name"]][1]):
             (nv, nf, _), (dv, df_, _) = (out.get(n, (0.0, False, "")) for n in spec["ratio_of"])
             if nf and df_ and dv:
-                out[spec["name"]] = (nv / dv * 100, True, out[spec["name"]][2] or "合計から計算")
+                out[spec["name"]] = (ratio_value(spec, nv, dv), True, out[spec["name"]][2] or "合計から計算")
     return out
 
 
