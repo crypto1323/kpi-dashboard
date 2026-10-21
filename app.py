@@ -95,6 +95,8 @@ CATALOG: list[dict] = _sales_items() + [
      "lookups": [("cross", "窓口売上", None, "全体", "窓口金単価"), ("cross", "全体1", "窓口売上", "全体", "窓口金単価")]},
     {"name": "自費単価", "category": "単価・平均", "unit": "円", "agg": MEAN,
      "lookups": [("cross", "窓口売上", None, "全体", "自費単価"), ("cross", "全体1", "窓口売上", "全体", "自費単価")]},
+    {"name": "全体平均単価", "category": "単価・平均", "unit": "円", "agg": MEAN,
+     "lookups": [("cross", "窓口売上", None, "全体", "全体単価"), ("cross", "全体1", "窓口売上", "全体", "全体単価")]},
     # 患者数
     {"name": "延べ来院数", "category": "患者数", "unit": "人", "agg": SUM,
      "lookups": [("cross", "来院人数", None, "合計", "人数"), ("cross", "全体1", "来院人数", "合計", "人数")]},
@@ -110,6 +112,14 @@ CATALOG: list[dict] = _sales_items() + [
      "lookups": [("cross", "来院人数", None, "午前", "人数"), ("cross", "全体1", "来院人数", "午前", "人数")]},
     {"name": "午後来院数", "category": "患者数", "unit": "人", "agg": SUM,
      "lookups": [("cross", "来院人数", None, "午後", "人数"), ("cross", "全体1", "来院人数", "午後", "人数")]},
+    # カルテ総数＝累計登録患者数（報告書の出力時点の累計）。日割りせず目標と比べ、複数院は合計する
+    {"name": "カルテ総数", "category": "患者数", "unit": "件", "agg": MEAN, "combine": SUM,
+     "lookups": [("right", "全体1", "累計登録患者数", "人数", None)]},
+    # 離反率の計算に使う内訳（離反者＝前月来院して当月来院しなかった人、前月の純患者数）
+    {"name": "離反者数", "category": "患者数", "unit": "人", "agg": MEAN, "combine": SUM,
+     "lookups": [("cross", "純患者数", None, "離反者(前月)", "当月"), ("cross", "全体1", "純患者数(内訳)", "離反者(前月)", "当月")]},
+    {"name": "前月純患者数", "category": "患者数", "unit": "人", "agg": MEAN, "combine": SUM,
+     "lookups": [("cross", "純患者数", None, "純患者数", "前月"), ("cross", "全体1", "純患者数(内訳)", "純患者数", "前月")]},
     # 率（報告書の 0.545 → 54.5%）
     {"name": "初診率（新患1→2回目）", "category": "初診率・継続率", "unit": "%", "agg": MEAN, "pct": True,
      "lookups": [("cross", "初診率", "新患", "比率", "1-2"), ("cross", "全体1", None, "初診率1-2", "%")]},
@@ -121,6 +131,9 @@ CATALOG: list[dict] = _sales_items() + [
      "lookups": [("cross", "初診率", "再診", "比率", "1-2")]},
     {"name": "継続患者の戻り率（1→2回目）", "category": "初診率・継続率", "unit": "%", "agg": MEAN, "pct": True,
      "lookups": [("cross", "初診率", "継続", "比率", "1-2")]},
+    # 離反率＝離反者数 ÷ 前月の純患者数（報告書の「離反者(前月)」当月の比率と同じ）。低いほど良い
+    {"name": "離反率", "category": "初診率・継続率", "unit": "%", "agg": MEAN, "lower_better": True,
+     "ratio_of": ("離反者数", "前月純患者数"), "lookups": []},
     # 平均値
     {"name": "平均通院回数", "category": "単価・平均", "unit": "回", "agg": MEAN,
      "lookups": [("right", "全体1", None, "平均通院回数", None)]},
@@ -132,9 +145,19 @@ CATALOG: list[dict] = _sales_items() + [
 CATALOG_SIG = hashlib.md5(repr(CATALOG).encode("utf-8")).hexdigest()
 CATEGORY_ORDER = ["窓口売上", "患者数", "初診率・継続率", "単価・平均", "患者区分別の売上", "追加項目"]
 
-# サマリーに大きく出す項目
-HEADLINE_ITEMS = ["窓口売上合計", "自費売上", "新患数", "延べ来院数"]
-SECONDARY_ITEMS = ["初診率（新患1→2回目）", "継続率（新患2→3回目）", "窓口金単価", "平均通院回数"]
+# ダッシュボード上部に並べる9項目（内部の項目名 → 画面での表示名）
+HEADLINE_KPIS = [
+    ("窓口売上合計", "合計売上"),
+    ("初診率（新患1→2回目）", "初診率"),
+    ("カルテ総数", "カルテ総数"),
+    ("新患数", "新患数"),
+    ("再診数", "再診数"),
+    ("離反率", "離反率"),
+    ("1日平均来院数", "平均人数（1日）"),
+    ("平均通院回数", "平均通院回数"),
+    ("全体平均単価", "全体平均単価"),
+]
+HEADLINE_ITEMS = [name for name, _ in HEADLINE_KPIS]
 
 # 初期値の目標（仮の値。画面の表で自由に書き換える）
 DEFAULT_TARGETS = {
@@ -272,8 +295,18 @@ def lookup_cross(grid, cells, anchor, row_label, col_label):
 
 
 def lookup_right(grid, cells, anchor, label):
-    """ラベルの右にある最初の数値。"""
-    for r, c in find_cells(cells, label):
+    """ラベルの右にある最初の数値。基準ラベルがあれば、その下6行以内にあるラベルだけを使う。"""
+    candidates = find_cells(cells, label)
+    if anchor:
+        found = find_cells(cells, anchor)
+        if not found:
+            return None
+        ar, ac = found[0]
+        candidates = sorted(
+            [(r, c) for r, c in find_cells(cells, label, (ar, ar + 6))],
+            key=lambda rc: (abs(rc[0] - ar) + abs(rc[1] - ac)),
+        )
+    for r, c in candidates:
         for cc in range(c + 1, min(c + 16, grid.shape[1])):
             v = parse_number(grid[r, cc])
             if v is not None:
@@ -433,6 +466,12 @@ def extract_file(raw: bytes, filename: str, custom: tuple, catalog_sig: str) -> 
             values[spec["name"]] = {"value": v, "found": True, "where": got[1]}
         else:
             values[spec["name"]] = {"value": 0.0, "found": False, "where": ""}
+    for spec in build_catalog(custom):  # 他の項目から計算する項目（例：離反率＝離反者数÷前月純患者数）
+        if spec.get("ratio_of"):
+            num, den = (values.get(n, {"found": False}) for n in spec["ratio_of"])
+            if num["found"] and den["found"] and den["value"]:
+                values[spec["name"]] = {"value": num["value"] / den["value"] * 100, "found": True,
+                                        "where": f"{num['where']} ÷ {den['where']}"}
     return {
         "values": values,
         "period": detect_period(raw, filename),
@@ -815,10 +854,19 @@ def add_months(d: date, months: int) -> date:
     return date(d.year + m // 12, m % 12 + 1, 1)
 
 
-def judge(actual: float, target, found: bool, agg: str, ratio: float) -> dict:
-    """差額＝実績−目標、進捗率＝実績÷目標×100。積み上げ項目は日割りの基準と比べて順調／遅れを判定。"""
+def judge(actual: float, target, found: bool, agg: str, ratio: float, lower_better: bool = False) -> dict:
+    """差額＝実績−目標、進捗率＝実績÷目標×100。積み上げ項目は日割りの基準と比べて順調／遅れを判定。
+    lower_better（離反率など低いほど良い項目）は、目標以下なら達成。進捗率は 目標÷実績×100（下げるほど100%に近づく）。"""
     has_target = target is not None and not pd.isna(target) and float(target) > 0
     out = {"diff": np.nan, "progress": np.nan, "expected": np.nan, "forecast": np.nan}
+    if lower_better:
+        if has_target:
+            target = float(target)
+            out["diff"] = actual - target
+            out["progress"] = target / actual * 100 if actual > 0 else 100.0
+            out["expected"] = target
+        out["status"] = ST_MISSING if not found else ST_NOTARGET if not has_target else ST_DONE if actual <= target else ST_BEHIND
+        return out
     if has_target:
         target = float(target)
         out["diff"] = actual - target
@@ -876,6 +924,11 @@ CSS = """
 .dot {width:8px; height:8px; border-radius:50%; display:inline-block; flex:none;}
 .kpi-value {font-size:1.4rem; font-weight:700; line-height:1.3; margin-top:4px;}
 .kpi-card.small .kpi-value {font-size:1.05rem;}
+.kpi-grid.kpi9 {grid-template-columns:repeat(5, minmax(0, 1fr)); gap:10px;}
+.kpi-grid.kpi9 .kpi-card {padding:10px 12px 8px;}
+.kpi-grid.kpi9 .kpi-value {font-size:1.2rem;}
+@media (max-width: 1100px) {.kpi-grid.kpi9 {grid-template-columns:repeat(3, minmax(0, 1fr));}}
+@media (max-width: 640px) {.kpi-grid.kpi9 {grid-template-columns:repeat(2, minmax(0, 1fr));}}
 .kpi-gap {font-size:.8rem; font-weight:600; margin-top:2px;}
 .kpi-bar {position:relative; height:5px; border-radius:3px; background:rgba(128,128,128,.18); margin:8px 0 6px;}
 .kpi-bar > .fill {height:100%; border-radius:3px;}
@@ -922,10 +975,12 @@ def section(title: str, note: str = "") -> None:
 def gap_text(row: pd.Series) -> str:
     unit = "ポイント" if row["単位"] == "%" else row["単位"]
     gap = row["目標"] - row["現状"]
+    if row.get("低いほど良い"):
+        return f"あと {fmt(-gap, unit)} 下げる" if gap < 0 else "達成"
     return f"あと {fmt(gap, unit)}" if gap > 0 else f"達成 {fmt_signed(-gap, row['単位'])}"
 
 
-def kpi_card(row: pd.Series, ratio: float, small: bool = False) -> str:
+def kpi_card(row: pd.Series, ratio: float, small: bool = False, label: str | None = None) -> str:
     color = STATUS_STYLE[row["判定"]][0]
     unit = row["単位"]
     has_target = not pd.isna(row["目標"])
@@ -933,12 +988,19 @@ def kpi_card(row: pd.Series, ratio: float, small: bool = False) -> str:
     pace = ""
     if has_target and row["集計"] == SUM and 0 < ratio < 1:
         pace = f"<div class='pace' style='left:{ratio * 100:.1f}%'></div>"
-    gap = f"<div class='kpi-gap' style='color:{color}'>{gap_text(row)}</div>" if has_target else "<div class='kpi-gap' style='opacity:.5'>目標未設定</div>"
-    meta = f"<span>目標 {fmt(row['目標'], unit)}</span><span>{fmt(row['進捗率'], '%')}</span>" if has_target else "<span></span>"
+    if not row["取得"]:  # 報告書から取れていない項目（以前に保存した報告書には無い項目など）は判定しない
+        has_target, width, pace = False, 0, ""
+        gap = "<div class='kpi-gap' style='opacity:.6'>未取得（報告書を再アップロード）</div>"
+    elif has_target:
+        gap = f"<div class='kpi-gap' style='color:{color}'>{gap_text(row)}</div>"
+    else:
+        gap = "<div class='kpi-gap' style='opacity:.5'>目標未設定</div>"
+    goal = f"目標 {fmt(row['目標'], unit)}{' 以下' if row.get('低いほど良い') else ''}"
+    meta = f"<span>{goal}</span><span>{fmt(row['進捗率'], '%')}</span>" if has_target else "<span></span>"
     return (
         f"<div class='kpi-card{' small' if small else ''}'>"
-        f"<div class='kpi-head'><span class='dot' style='background:{color}'></span>{row['項目']}</div>"
-        f"<div class='kpi-value'>{fmt(row['現状'], unit)}</div>{gap}"
+        f"<div class='kpi-head'><span class='dot' style='background:{color}'></span>{label or row['項目']}</div>"
+        f"<div class='kpi-value'>{fmt(row['現状'], unit) if row['取得'] else '—'}</div>{gap}"
         f"<div class='kpi-bar'><div class='fill' style='width:{width:.1f}%;background:{color}'></div>{pace}</div>"
         f"<div class='kpi-meta'>{meta}</div></div>"
     )
@@ -1287,12 +1349,17 @@ def aggregate_values(reps: list[dict]) -> dict[str, tuple[float, bool, str]]:
     for spec in catalog:
         vals = [r["values"].get(spec["name"], {"value": 0.0, "found": False, "where": ""}) for r in reps]
         found = [v for v in vals if v["found"]]
-        if spec["agg"] == SUM:
+        if spec.get("combine", spec["agg"]) == SUM:
             value = float(sum(v["value"] for v in vals))
         else:
             value = float(np.mean([v["value"] for v in found])) if found else 0.0
         where = found[0]["where"] if len(reps) == 1 and found else ("" if not found else f"{len(found)}/{len(reps)}院で取得")
         out[spec["name"]] = (value, bool(found), where)
+    for spec in catalog:  # 割合の項目は、院ごとの割合の平均ではなく「合計どうしの割合」にする
+        if spec.get("ratio_of") and len(reps) > 1:
+            (nv, nf, _), (dv, df_, _) = (out.get(n, (0.0, False, "")) for n in spec["ratio_of"])
+            if nf and df_ and dv:
+                out[spec["name"]] = (nv / dv * 100, True, out[spec["name"]][2] or "合計から計算")
     return out
 
 
@@ -1419,13 +1486,14 @@ def build_kpi_table() -> pd.DataFrame:
     for spec in catalog:
         value, found, where = values[spec["name"]]
         target = ss.kpi_targets.get(spec["name"])
-        res = judge(value, target, found, spec["agg"], ratio)
+        res = judge(value, target, found, spec["agg"], ratio, spec.get("lower_better", False))
         rows.append(
             {
                 "カテゴリ": spec["category"],
                 "項目": spec["name"],
                 "単位": spec["unit"],
                 "集計": spec["agg"],
+                "低いほど良い": bool(spec.get("lower_better")),
                 "現状": value,
                 "取得": found,
                 "目標": float(target) if target is not None and not pd.isna(target) else np.nan,
@@ -1481,9 +1549,8 @@ def page_dashboard():
         chips += f"<span class='chip' style='opacity:.7'>⚠️ 未検出<b>{n_missing}</b></span>"
     st.markdown(f"<div class='chips'>{chips}</div>", unsafe_allow_html=True)
 
-    for names, small in ((HEADLINE_ITEMS, False), (SECONDARY_ITEMS, True)):
-        cards = [kpi_card(kpi[kpi["項目"] == n].iloc[0], ratio, small) for n in names if n in by_name.index]
-        st.markdown("<div class='kpi-grid'>" + "".join(cards) + "</div>", unsafe_allow_html=True)
+    cards = [kpi_card(kpi[kpi["項目"] == n].iloc[0], ratio, label=label) for n, label in HEADLINE_KPIS if n in by_name.index]
+    st.markdown("<div class='kpi-grid kpi9'>" + "".join(cards) + "</div>", unsafe_allow_html=True)
 
     behind = judged[judged["判定"] == ST_BEHIND].sort_values("進捗率").head(5)
     good = judged[judged["判定"] == ST_DONE].sort_values("進捗率", ascending=False).head(5)
