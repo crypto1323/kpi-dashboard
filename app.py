@@ -1319,6 +1319,24 @@ for rep in reports:
 used = list(latest.values())
 skipped = [r["file"] for r in reports if r not in used]
 
+# 離反率（＝離反者 ÷ 前月の純患者数）の元になる値をそろえる
+#   ・離反者は「離反者数」「離反者」「離反者(前月)」のどの名前で保存されていても使う
+#   ・前月の純患者数が保存されていなければ、同じ院の前月の報告書（月末まで）の「純患者数」を使う（報告書の値と一致）
+CHURN_ALIASES = ("離反者数", "離反者", "離反者(前月)", "離反者（前月）")
+by_clinic_month = {(r["clinic"], r["month"]): r for r in used}
+for rep in used:
+    vals = rep["values"]
+    if not vals.get("離反者数", {}).get("found"):
+        alias = next((vals[k] for k in CHURN_ALIASES if vals.get(k, {}).get("found")), None)
+        if alias:
+            vals["離反者数"] = {**alias, "where": alias.get("where") or "離反者"}
+    if not vals.get("前月純患者数", {}).get("found"):
+        prev = by_clinic_month.get((rep["clinic"], rep["month"] - 1))
+        prev_full_month = prev and prev["period"]["end"] == month_bounds(prev["month"].year, prev["month"].month)[1]
+        if prev_full_month and prev["values"].get("純患者数", {}).get("found"):
+            vals["前月純患者数"] = {"value": prev["values"]["純患者数"]["value"], "found": True,
+                                "where": f"前月（{prev['month'].month}月）の報告書の純患者数"}
+
 for msg in read_errors:
     st.error(msg)
 if not used:
