@@ -4,10 +4,11 @@
     pip install -r requirements.txt
     streamlit run app.py
 
-CRM の「月間報告書」Excel（.xls / .xlsx）をアップロードすると、
-「窓口売上」「来院人数」「純患者数(内訳)」「初診率・継続率」「施術分類」などのシート
-（見つからなければ「月間報告書【全体１】」）から主要項目を自動で取り出し、
-目標値と比べた差額・進捗率を1画面で表示する。
+読み込めるデータ（サイドバーからアップロード）:
+  ① 全体の数値 … 「店舗分析データ (月次推移)」CSV（縦に項目名、横に1月〜12月）、または CRM の月間報告書 Excel
+  ② メニュー別の数値 … 「商品売上分析」CSV（商品名・カテゴリー・販売数・売上金額）
+目標と比べた差額・進捗率を、単月または「〇月〜〇月」の合算で表示する。
+読み込んだデータと目標は、そのブラウザのセッション（st.session_state）だけに保存し、他の人とは共有しない。
 """
 
 import calendar
@@ -16,11 +17,9 @@ import hmac
 import html
 import io
 import json
-import os
-import threading
 import re
 import unicodedata
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 
 import altair as alt
@@ -38,16 +37,6 @@ MEAN = "平均"  # 率・単価・平均値：目標値そのものと比較
 
 SUPPORTED_EXTS = ["xls", "xlsx", "csv"]
 EXCEL_ENGINES = {".xlsx": "openpyxl", ".xls": "xlrd"}
-
-# 全員で共有するデータの保存先
-#   .streamlit/secrets.toml に [supabase] の url と key があれば Supabase（クラウドのデータベース）に保存する。
-#   無い場合はこのPCの data フォルダに保存する（ローカルで動かすとき用。クラウドでは再起動で消える）。
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-LOCAL_UPLOAD_DIR = BASE_DIR / "uploads"       # 以前の版でアップロードされた報告書（クラウドへの移行元）
-LEGACY_DIR = BASE_DIR / ".dashboard_state"    # さらに前の版の保存先（移行元）
-STORE_TABLE = "app_store"                     # 目標・設定（キーと JSON）
-REPORT_TABLE = "kpi_reports"                  # 報告書から抽出した数値（院・月ごとに1行）
 
 ALL_CLINICS = "全院合計"
 TOTAL_WORDS = {"合計", "小計", "総計", "計"}
@@ -614,241 +603,186 @@ def sample_files(today: date, version: int = 2) -> list[tuple[str, bytes]]:
 
 
 # ---------------------------------------------------------------------------
-# 共有データの保存・読み込み（Supabase またはローカルファイル）
-#   ・目標・設定     … app_store テーブルの "targets" / "config" 行（JSON）
-#   ・報告書の実績   … kpi_reports テーブル（Excel そのものではなく、抽出した数値と施術分類の内訳を保存）
+# データの保存先：このブラウザのセッション（st.session_state）だけ
+#   アップロードしたデータ・目標・設定は、他の人の画面とは共有しない。
+#   ページを再読み込み（F5）・ログアウトすると消える（目標はファイルに書き出して保存できる）。
 # ---------------------------------------------------------------------------
-@st.cache_resource
-def shared_lock() -> threading.Lock:
-    """全ユーザー（全セッション）で共通のロック。同時に保存しても内容が壊れないようにする。"""
-    return threading.Lock()
+def session_store() -> dict:
+    return st.session_state.setdefault("_store", {"targets": {}, "config": {}})
 
 
-def _secrets_dict() -> dict:
-    try:
-        return st.secrets.to_dict()
-    except Exception:  # noqa: BLE001  secrets が無い・書式が不正
-        return {}
-
-
-def _pick(section: dict, *names: str) -> str | None:
-    """大文字・小文字の違いを無視して、最初に見つかった値を返す。"""
-    lowered = {str(k).lower(): v for k, v in section.items()}
-    for n in names:
-        v = lowered.get(n.lower())
-        if v:
-            return str(v).strip()
-    return None
-
-
-def supabase_settings() -> tuple[str, str] | None:
-    """Supabase の接続情報。次のどの書き方でも読み取る。
-    [supabase] url / key（推奨）、[supabase] SUPABASE_URL / SUPABASE_KEY、[connections.supabase] …、最上位の SUPABASE_URL / SUPABASE_KEY
-    """
-    secrets = _secrets_dict()
-    sections = [
-        {str(k).lower(): v for k, v in secrets.items()}.get("supabase"),
-        (secrets.get("connections") or {}).get("supabase") if isinstance(secrets.get("connections"), dict) else None,
-        secrets,
-    ]
-    for sec in sections:
-        if isinstance(sec, dict):
-            url = _pick(sec, "url", "supabase_url", "project_url")
-            key = _pick(sec, "key", "supabase_key", "secret_key", "service_role_key")
-            if url and key:
-                return url, key
-    return None
-
-
-@st.cache_resource(show_spinner=False)
-def supabase_client(url: str, key: str):
-    from supabase import create_client
-
-    return create_client(url, key)
-
-
-def db():
-    """Supabase のクライアント。接続情報が無ければ None（ローカルファイルに保存する）。"""
-    conf = supabase_settings()
-    return supabase_client(*conf) if conf else None
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-# ---- ローカルファイル（Supabase 未設定のとき） ----
-def read_json(path: Path, default=None):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {} if default is None else default
-
-
-def write_json_atomic(path: Path, data) -> None:
-    os.makedirs(path.parent, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def local_path(key: str) -> Path:
-    return DATA_DIR / f"{key}.json"
-
-
-# ---- 目標・設定（キーごとの JSON） ----
 def store_get(key: str) -> dict:
-    client = db()
-    if client is None:
-        return read_json(local_path(key))
-    rows = client.table(STORE_TABLE).select("value").eq("key", key).limit(1).execute().data
-    return dict(rows[0]["value"] or {}) if rows else {}
+    return dict(session_store().get(key, {}))
 
 
 def store_put(key: str, value: dict) -> None:
-    client = db()
-    if client is None:
-        write_json_atomic(local_path(key), value)
-        return
-    client.table(STORE_TABLE).upsert({"key": key, "value": value, "updated_at": now_iso()}).execute()
+    session_store()[key] = dict(value)
 
 
-def update_shared(key: str, changes: dict) -> None:
-    """最新の内容を読み直してから、変更した部分だけを反映して保存する（他の人の保存を消さない）。"""
-    with shared_lock():
-        data = store_get(key)
-        data.update(changes)
-        store_put(key, data)
+def update_store(key: str, changes: dict) -> None:
+    data = store_get(key)
+    data.update(changes)
+    store_put(key, data)
 
 
-def apply_diff(key: str, section: str, before: dict, after: dict) -> None:
-    """section（例：kpi）の中で、この画面で変更されたキーだけを最新の内容に反映する。"""
-    changed = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
-    with shared_lock():
-        data = store_get(key)
-        current = dict(data.get(section, before))  # まだ一度も保存されていなければ、表示していた値（初期値）を土台にする
-        for k in changed:
-            if after.get(k) is None:
-                current.pop(k, None)
-            else:
-                current[k] = after[k]
-        data[section] = current
-        store_put(key, data)
+def save_section(key: str, section: str, value: dict) -> None:
+    data = store_get(key)
+    data[section] = dict(value)
+    store_put(key, data)
 
 
-# ---- 報告書から抽出した実績 ----
-def to_jsonable(obj):
-    """データベース（JSON）に保存できる形にそろえる（NaN → None、numpy の数値 → Python の数値）。"""
-    if isinstance(obj, dict):
-        return {str(k): to_jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [to_jsonable(v) for v in obj]
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (float, np.floating)):
-        return None if pd.isna(obj) else float(obj)
-    if isinstance(obj, (np.bool_,)):
-        return bool(obj)
-    return obj
+# ---------------------------------------------------------------------------
+# CSV の読み込み
+#   ・店舗分析データ（月次推移）：縦に項目名、横に 1月〜12月
+#   ・商品売上分析（メニュー別）：商品名・カテゴリー・販売数・売上金額（期間はファイル名から）
+# ---------------------------------------------------------------------------
+MONTH_HEADER_RE = re.compile(r"^\s*(\d{1,2})\s*月\s*$")
+LABEL_UNIT_RE = re.compile(r"^(.*?)\s*\(([^()]*)\)\s*$")
+FILE_PERIOD_RE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})_(\d{4})-(\d{1,2})-(\d{1,2})")
+
+# 9つのKPIなど、ダッシュボードの項目 ← 店舗分析CSVの項目名（単位の（ ）を除いた名前）
+CSV_ITEM_MAP = {
+    "窓口売上合計": ["売上合計"],
+    "初診率（新患1→2回目）": ["初診率"],
+    "純患者数": ["カルテ総数"],
+    "新患数": ["新患数"],
+    "再診数": ["再診数"],
+    "離反率": ["離反率"],
+    "1日平均来院数": ["総来平均"],
+    "平均通院回数": ["平均通院日数"],
+    "全体平均単価": ["1回あたりの単価"],
+    "延べ来院数": ["総来患数(のべ)", "総来患数"],
+    "保険売上": ["保険合計"],
+    "自費売上": ["自費合計"],
+}
+# 上の項目以外でダッシュボードに取り込む区分（支払方法の内訳・経由データなどは数が多いので取り込まない）
+CSV_EXTRA_SECTIONS = ("重要指標", "成約データ", "来患データ", "来患分析", "売上分類", "平均単価")
+CSV_CATEGORY = "店舗分析CSV"
 
 
-def report_row(file_name: str, ext: dict, period: dict) -> dict:
-    """抽出結果を、データベースに保存する1行（院・月ごと）に変換する。"""
-    month = f"{period['end']:%Y-%m}"
-    return to_jsonable({
-        "id": f"{ext['clinic']}|{month}",
-        "clinic": ext["clinic"],
-        "month": month,
-        "period_start": period["start"].isoformat(),
-        "period_end": period["end"].isoformat(),
-        "file_name": file_name,
-        "data_values": ext["values"],
-        "breakdown": ext["breakdown"].to_dict("records"),
-        "uploaded_at": now_iso(),
-    })
+def decode_text(raw: bytes) -> str:
+    for enc in ("utf-8-sig", "cp932"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError("CSVの文字コードを判別できませんでした（UTF-8 または Shift_JIS で保存してください）。")
 
 
-def load_report_rows() -> list[dict]:
-    client = db()
-    if client is None:
-        return list(read_json(local_path("reports"), default={}).values())
-    return client.table(REPORT_TABLE).select("*").order("period_end").execute().data
+def csv_unit(unit: str) -> str:
+    return {"円": "円", "人": "人", "枚": "枚", "%": "%", "％": "%", "日": "日", "分": "分", "件": "件", "回": "回"}.get(unit.strip(), unit.strip())
 
 
-def save_report_row(row: dict) -> str:
-    """院・月ごとに1行。同じ院・同じ月が保存済みなら、対象期間がより新しい方を残す。"new"／"update"／"skip" を返す。"""
-    with shared_lock():
-        client = db()
-        if client is None:
-            rows = read_json(local_path("reports"), default={})
-            existing = rows.get(row["id"])
-        else:
-            found = client.table(REPORT_TABLE).select("period_start, period_end").eq("id", row["id"]).limit(1).execute().data
-            existing = found[0] if found else None
-        if existing and (str(existing["period_end"])[:10], str(existing["period_start"])[:10]) > (row["period_end"], row["period_start"]):
-            return "skip"
-        if client is None:
-            rows[row["id"]] = row
-            write_json_atomic(local_path("reports"), rows)
-        else:
-            client.table(REPORT_TABLE).upsert(row).execute()
-        return "update" if existing else "new"
+@st.cache_data(show_spinner=False)
+def parse_monthly_csv(raw: bytes, filename: str) -> dict | None:
+    """店舗分析データ（月次推移）を読む。月の列が3つ以上ある CSV でなければ None。"""
+    import csv
 
-
-def delete_report_rows(ids: list[str]) -> None:
-    with shared_lock():
-        client = db()
-        if client is None:
-            rows = read_json(local_path("reports"), default={})
-            for i in ids:
-                rows.pop(i, None)
-            write_json_atomic(local_path("reports"), rows)
-        elif ids:
-            client.table(REPORT_TABLE).delete().in_("id", ids).execute()
-
-
-def row_to_report(row: dict) -> dict:
-    breakdown = pd.DataFrame(row.get("breakdown") or [], columns=["分類", "人数", "売上"])
-    return {
-        "id": row["id"],
-        "file": row.get("file_name") or row["id"],
-        "clinic": row["clinic"],
-        "period": {
-            "start": date.fromisoformat(str(row["period_start"])[:10]),
-            "end": date.fromisoformat(str(row["period_end"])[:10]),
-        },
-        "values": row.get("data_values") or {},
-        "breakdown": breakdown,
-    }
-
-
-def shared_signature() -> tuple:
-    """目標・設定・実績のどれかが更新されたかを判定するための目印（30秒ごとの自動更新で使う）。"""
-    client = db()
-    if client is None:
-        return tuple(p.stat().st_mtime_ns if p.exists() else 0 for p in (local_path("targets"), local_path("config"), local_path("reports")))
-    latest_store = client.table(STORE_TABLE).select("updated_at").order("updated_at", desc=True).limit(1).execute().data
-    reports = client.table(REPORT_TABLE).select("uploaded_at", count="exact").order("uploaded_at", desc=True).limit(1).execute()
-    return (
-        latest_store[0]["updated_at"] if latest_store else None,
-        reports.data[0]["uploaded_at"] if reports.data else None,
-        reports.count,
+    rows = list(csv.reader(io.StringIO(decode_text(raw))))
+    if not rows:
+        return None
+    header = [h.strip() for h in rows[0]]
+    month_cols = {i: int(m.group(1)) for i, h in enumerate(header) if (m := MONTH_HEADER_RE.match(h))}
+    if len(month_cols) < 3:
+        return None
+    year_m = next((re.search(r"(\d{4})\s*年", h) for h in header if re.search(r"(\d{4})\s*年", h)), None) or re.search(
+        r"(20\d{2})", filename
     )
+    year = int(year_m.group(1)) if year_m else date.today().year
+    items, section = [], ""
+    for r in rows[1:]:
+        if len(r) < 2:
+            continue
+        if r[0].strip():
+            section = r[0].strip()
+        label = r[1].strip()
+        if not label:
+            continue
+        m = LABEL_UNIT_RE.match(label)
+        name, unit = (m.group(1).strip(), csv_unit(m.group(2))) if m else (label, "")
+        values = {mo: parse_number(r[i]) for i, mo in month_cols.items() if i < len(r)}
+        items.append({"section": section, "name": name, "unit": unit, "values": values})
+    return {"year": year, "items": items}
 
 
-def legacy_local_data() -> dict:
-    """このPCのファイルに保存されていた目標・設定・報告書（以前の版のデータ）。クラウドへの移行に使う。"""
-    old = read_json(LEGACY_DIR / "settings.json")
-    targets = read_json(local_path("targets")) or (
-        {"kpi": old["kpi_targets"], "menu_sales": old.get("menu_targets", {}), "menu_count": old.get("menu_count_targets", {})}
-        if old.get("kpi_targets") else {}
+@st.cache_data(show_spinner=False)
+def parse_menu_csv(raw: bytes, filename: str) -> dict | None:
+    """メニュー別の CSV（商品名・販売数・売上金額など）を読む。該当の列が無ければ None。"""
+    df = pd.read_csv(io.StringIO(decode_text(raw)), dtype=str).fillna("")
+    cols = {norm_text(c): c for c in df.columns}
+
+    def col(*names):
+        return next((cols[norm_text(n)] for n in names if norm_text(n) in cols), None)
+
+    name_col = col("商品名", "メニュー名", "メニュー", "施術分類", "分類")
+    count_col = col("販売数", "件数", "人数", "数量")
+    sales_col = col("売上金額", "売上", "金額", "売上(円)")
+    group_col = col("カテゴリー", "カテゴリ", "グループ", "親メニュー")
+    store_col = col("店舗名", "院名", "店舗")
+    if not name_col or not (count_col or sales_col):
+        return None
+    out = pd.DataFrame(
+        {
+            "分類": df[name_col].map(lambda v: unicodedata.normalize("NFKC", str(v)).strip()),
+            "グループ": df[group_col].map(lambda v: unicodedata.normalize("NFKC", str(v)).strip() or None) if group_col else None,
+            "人数": df[count_col].map(lambda v: parse_number(v) or 0.0) if count_col else 0.0,
+            "売上": df[sales_col].map(lambda v: parse_number(v) or 0.0) if sales_col else 0.0,
+        }
     )
-    config = read_json(local_path("config")) or {k: old[k] for k in ("custom_items", "menu_groups", "manual_periods") if k in old}
-    files = []
-    for folder in (LOCAL_UPLOAD_DIR, LEGACY_DIR / "uploads"):
-        if folder.exists():
-            files += [f for f in folder.iterdir() if f.is_file() and f.suffix.lower()[1:] in SUPPORTED_EXTS]
-    return {"targets": targets, "config": config, "files": files, "reports": read_json(local_path("reports"), default={})}
+    out = out[out["分類"] != ""].groupby("分類", as_index=False).agg({"グループ": "first", "人数": "sum", "売上": "sum"})
+    period = None
+    if m := FILE_PERIOD_RE.search(filename):
+        y1, m1, d1, y2, m2, d2 = m.groups()
+        start, end = safe_date(y1, m1, d1), safe_date(y2, m2, d2)
+        if start and end:
+            period = {"start": start, "end": end}
+    store = next((v for v in df[store_col] if str(v).strip()), None) if store_col else None
+    return {"breakdown": out, "period": period, "store": store}
+
+
+def month_period(month: pd.Period, today: date) -> dict:
+    """月の対象期間。当月は昨日まで（データの最終日）とみなす。"""
+    start, end = month_bounds(month.year, month.month)
+    if start <= today <= end:
+        end = max(start, today - timedelta(days=1))
+    return {"start": start, "end": end, "where": "月の列"}
+
+
+def monthly_csv_records(parsed: dict, filename: str, clinic: str, today: date) -> tuple[list[dict], list[dict]]:
+    """店舗分析CSV → 月ごとの実績（records）と、ダッシュボードに追加する項目（specs）。"""
+    first_by_name: dict[str, dict] = {}
+    for it in parsed["items"]:
+        first_by_name.setdefault(it["name"], it)
+    mapped_labels = {label for labels in CSV_ITEM_MAP.values() for label in labels}
+    extra = [it for name, it in first_by_name.items() if it["section"] in CSV_EXTRA_SECTIONS and name not in mapped_labels]
+    specs = [
+        {
+            "name": it["name"],
+            "category": CSV_CATEGORY,
+            "unit": it["unit"],
+            "agg": MEAN if it["unit"] == "%" or any(w in it["name"] for w in ("平均", "率", "単価", "日数")) else SUM,
+            "lookups": [],
+        }
+        for it in extra
+    ]
+    records = []
+    for mo in range(1, 13):
+        month = pd.Period(f"{parsed['year']}-{mo:02d}", "M")
+        values = {}
+        for key, labels in CSV_ITEM_MAP.items():
+            it = next((first_by_name[l] for l in labels if l in first_by_name), None)
+            v = it["values"].get(mo) if it else None
+            values[key] = {"value": float(v) if v is not None else 0.0, "found": v is not None,
+                           "where": f"{it['name']}（{mo}月）" if it and v is not None else ""}
+        for it in extra:
+            v = it["values"].get(mo)
+            values[it["name"]] = {"value": float(v) if v is not None else 0.0, "found": v is not None,
+                                  "where": f"{it['name']}（{mo}月）" if v is not None else ""}
+        if not values["窓口売上合計"]["found"]:  # 売上が空の月（まだ来ていない月）は読み込まない
+            continue
+        records.append({"file": filename, "clinic": clinic, "period": month_period(month, today), "values": values,
+                        "breakdown": pd.DataFrame(columns=["分類", "グループ", "人数", "売上"])})
+    return records, specs
 
 
 # ---------------------------------------------------------------------------
@@ -1180,28 +1114,15 @@ today = date.today()
 ss = st.session_state
 ss.setdefault("target_ver", 0)
 ss.setdefault("upload_ver", 0)
+ss.setdefault("sources", {})  # 読み込んだファイル（このブラウザだけ）：id → 内容
 
-
-@st.cache_data(show_spinner=False)
-def cached_report_rows(signature: tuple) -> list[dict]:
-    """保存済みの実績。データが更新されない限り（signature が同じ限り）データベースを読み直さない。"""
-    return load_report_rows()
-
-
-# 共有の目標・設定・実績は、画面を表示するたびに最新の内容を確認する（他の人が保存した値もすぐ反映される）
-try:
-    ss.data_sig = shared_signature()
-    shared_targets = store_get("targets")
-    config = store_get("config")
-    report_rows = cached_report_rows(ss.data_sig)
-except Exception:  # noqa: BLE001
-    st.error("現在、データを読み込めません。しばらくしてからページを再読み込みしてください。解決しない場合は管理者にご連絡ください。")
-    st.stop()
-ss.kpi_targets = dict(shared_targets.get("kpi", DEFAULT_TARGETS))     # 一度も保存されていなければ初期値
+shared_targets = store_get("targets")
+config = store_get("config")
+ss.kpi_targets = dict(shared_targets.get("kpi", DEFAULT_TARGETS))     # 一度も保存していなければ初期値
 ss.menu_targets = dict(shared_targets.get("menu_sales", {}))           # メニュー別 売上目標
 ss.menu_count_targets = dict(shared_targets.get("menu_count", {}))     # メニュー別 件数目標
 
-# 追加の抽出項目（目標設定ページで編集。アップロード時の抽出に使う）
+# 追加の抽出項目（目標設定ページで編集。月間報告書の読み込みに使う）
 custom = tuple(
     (
         str(r.get("項目名") or "").strip(), str(r.get("単位") or ""), r.get("集計") if r.get("集計") in (SUM, MEAN) else SUM,
@@ -1212,99 +1133,122 @@ custom = tuple(
     if str(r.get("項目名") or "").strip() and str(r.get("行ラベル") or "").strip()
 )
 
-# ローカル保存のときだけ：以前の版で uploads フォルダに保存された報告書を、初回に一度だけ数値データへ変換する
-if not supabase_settings() and not local_path("reports").exists():
-    manual = config.get("manual_periods", {})
-    for f in legacy_local_data()["files"]:
-        try:
-            ext = extract_file(f.read_bytes(), f.name, custom, CATALOG_SIG)
-        except (OSError, ValueError):
-            continue
-        period = ext["period"] or (
-            {"start": date.fromisoformat(manual[f.name][0]), "end": date.fromisoformat(manual[f.name][1])} if f.name in manual else None
-        )
-        if period:
-            save_report_row(report_row(f.name, ext, period))
-    if not local_path("reports").exists():
-        write_json_atomic(local_path("reports"), {})
-    ss.data_sig = shared_signature()
-    report_rows = cached_report_rows(ss.data_sig)
+
+def add_source(kind: str, name: str, raw: bytes) -> str:
+    """アップロードされたファイルを読み、このブラウザのデータに追加する。結果を文字で返す。"""
+    sid = f"{name}:{hashlib.md5(raw).hexdigest()[:10]}"
+    if sid in ss.sources:
+        return f"「{name}」は読み込み済みです"
+    ext = Path(name).suffix.lower()
+    if kind == "menu":
+        if ext != ".csv":
+            raise ValueError("メニュー別の数値は CSV（商品売上分析など）をアップロードしてください。")
+        parsed = parse_menu_csv(raw, name)
+        if parsed is None:
+            raise ValueError("「商品名」と「販売数」または「売上金額」の列が見つかりませんでした。")
+        month = pd.Period(parsed["period"]["end"], "M") if parsed["period"] else None
+        ss.sources[sid] = {"kind": "menu", "name": name, "data": parsed, "month": month, "month_detected": month is not None}
+        return f"「{name}」：メニュー {len(parsed['breakdown'])}件"
+    if ext == ".csv" and (parsed := parse_monthly_csv(raw, name)) is not None:
+        ss.sources[sid] = {"kind": "monthly", "name": name, "data": parsed}
+        return f"「{name}」：{parsed['year']}年の月次推移"
+    ext_data = extract_file(raw, name, custom, CATALOG_SIG)  # 月間報告書（Excel）
+    month = pd.Period(ext_data["period"]["end"], "M") if ext_data["period"] else None
+    ss.sources[sid] = {"kind": "report", "name": name, "data": ext_data, "month": month, "month_detected": month is not None}
+    return f"「{name}」：{ext_data['clinic']} の月間報告書"
+
+
+KIND_LABEL = {"monthly": "📈 月次推移CSV", "report": "📄 月間報告書", "menu": "🍽️ メニュー別CSV"}
 
 with st.sidebar:
-    st.markdown("**📂 月間報告書（全員で共有）**")
-    uploads = st.file_uploader(
-        "Excel（.xls / .xlsx）を選択（複数可）",
-        type=SUPPORTED_EXTS,
-        accept_multiple_files=True,
-        help="報告書から数値を取り出してデータベースに保存します（Excel ファイルそのものは保存しません）。他の人の画面にも表示されます。",
-        label_visibility="collapsed",
-        key=f"uploader_{ss.upload_ver}",
+    st.markdown("**📂 データの読み込み**")
+    st.caption("読み込んだデータと目標は、この画面だけで使われます（他の人には見えません）。再読み込みすると消えます。")
+    up_total = st.file_uploader(
+        "① 全体の数値（店舗分析データCSV・月間報告書Excel）",
+        type=["csv", "xls", "xlsx"], accept_multiple_files=True, key=f"up_total_{ss.upload_ver}",
+        help="「店舗分析データ (月次推移)」のCSV（縦に項目名、横に1月〜12月）や、月間報告書のExcelを読み込みます。",
     )
-    if uploads:
-        counts = {"new": 0, "update": 0, "skip": 0}
-        errors, pending = [], []
-        with st.spinner("報告書から数値を取り出して保存しています…"):
-            for u in uploads:
-                try:
-                    ext = extract_file(u.getvalue(), u.name, custom, CATALOG_SIG)
-                except ValueError as e:
-                    errors.append(f"「{u.name}」：{e}")
-                    continue
-                if ext["period"] is None:
-                    pending.append({"file": u.name, "ext": ext})  # 対象期間を指定してから保存する
-                    continue
-                counts[save_report_row(report_row(u.name, ext, ext["period"]))] += 1
-        ss.pending_reports = ss.get("pending_reports", []) + pending
-        ss.upload_notice = (
-            f"保存しました：新規 {counts['new']}件・更新 {counts['update']}件"
-            + (f"・より新しい報告書が保存済みのため見送り {counts['skip']}件" if counts["skip"] else "")
-        )
-        ss.upload_errors = errors
+    up_menu = st.file_uploader(
+        "② メニュー別の数値（商品売上分析CSV）",
+        type=["csv"], accept_multiple_files=True, key=f"up_menu_{ss.upload_ver}",
+        help="商品名・カテゴリー・販売数・売上金額の列があるCSV。対象期間はファイル名（例：_2026-10-01_2026-10-11）から読み取ります。",
+    )
+    if up_total or up_menu:
+        msgs, errors = [], []
+        with st.spinner("読み込んでいます…"):
+            for kind, files in (("total", up_total or []), ("menu", up_menu or [])):
+                for u in files:
+                    try:
+                        msgs.append(add_source(kind, u.name, u.getvalue()))
+                    except ValueError as e:
+                        errors.append(f"「{u.name}」：{e}")
+        ss.upload_notice, ss.upload_errors = msgs, errors
         ss.upload_ver += 1  # アップロード欄を空に戻す
         st.rerun()
-    if notice := ss.pop("upload_notice", None):
-        st.success(notice, icon="✅")
+    for msg in ss.pop("upload_notice", []):
+        st.success(msg, icon="✅")
     for msg in ss.pop("upload_errors", []):
         st.error(msg)
 
-    if ss.get("pending_reports"):
-        with st.expander("📅 対象期間を指定して保存", expanded=True):
-            st.caption("次の報告書は対象期間が見つかりませんでした。期間を指定して保存してください。")
-            with st.form("pending_form", border=False):
-                picked = [
-                    st.date_input(pnd["file"], value=(date(today.year, today.month, 1), today), key=f"pending_{i}_{ss.upload_ver}")
-                    for i, pnd in enumerate(ss.pending_reports)
-                ]
-                c1, c2 = st.columns(2)
-                ok = c1.form_submit_button("保存", type="primary", width="stretch")
-                cancel = c2.form_submit_button("取り消す", width="stretch")
-            if ok or cancel:
-                if ok:
-                    for pnd, val in zip(ss.pending_reports, picked):
-                        if isinstance(val, (tuple, list)) and len(val) == 2:
-                            save_report_row(report_row(pnd["file"], pnd["ext"], {"start": val[0], "end": val[1]}))
-                ss.pending_reports = []
-                st.rerun()
+    if ss.sources:
+        st.markdown(f"**読み込み済み（{len(ss.sources)}件）**")
+        for sid, src in list(ss.sources.items()):
+            with st.container(border=True):
+                st.markdown(f"{KIND_LABEL[src['kind']]}<br><small>{html.escape(src['name'])}</small>", unsafe_allow_html=True)
+                if st.button("このデータを削除", icon=":material/delete:", key=f"del_{sid}", type="tertiary"):
+                    del ss.sources[sid]
+                    st.rerun()
+                if src["kind"] in ("menu", "report"):
+                    choices = [pd.Period(today, "M") - i for i in range(24)]
+                    current = src["month"] or choices[0]
+                    if current not in choices:
+                        choices.append(current)
+                    picked = st.selectbox(
+                        "対象月" + ("" if src["month_detected"] else "（ファイルから読み取れないため選択）"),
+                        choices, index=choices.index(current), format_func=lambda m: f"{m.year}年{m.month:02d}月",
+                        key=f"month_{sid}",
+                    )
+                    src["month"] = picked
+        if st.button("すべて削除", icon=":material/delete_sweep:", width="stretch", help="読み込んだデータをすべて削除します"):
+            ss.sources = {}
+            ss.upload_ver += 1
+            st.rerun()
 
-reports = [row_to_report(r) for r in report_rows]
-read_errors: list[str] = []
+# ---- 読み込んだファイル → 月ごとの実績 ----
+csv_clinic = next((src["data"]["store"] for src in ss.sources.values() if src["kind"] == "menu" and src["data"].get("store")), None) \
+    or "店舗分析データ"
+reports, csv_specs, read_errors = [], [], []
+for sid, src in ss.sources.items():
+    if src["kind"] == "monthly":
+        recs, specs = monthly_csv_records(src["data"], src["name"], csv_clinic, today)
+        reports += recs
+        csv_specs += [sp for sp in specs if sp["name"] not in {c["name"] for c in csv_specs}]
+    elif src["kind"] == "report" and src["month"] is not None:
+        ext_data = src["data"]
+        period = ext_data["period"] if src["month_detected"] else month_period(src["month"], today)
+        reports.append({"file": src["name"], "clinic": ext_data["clinic"], "period": period,
+                        "values": {k: dict(v) for k, v in ext_data["values"].items()}, "breakdown": ext_data["breakdown"]})
+for src in ss.sources.values():  # メニュー別CSV：同じ月の実績に結合（無ければメニューだけの月を作る）
+    if src["kind"] != "menu" or src["month"] is None:
+        continue
+    period = src["data"]["period"] if src["month_detected"] else month_period(src["month"], today)
+    target = next((r for r in reports if pd.Period(r["period"]["end"], "M") == src["month"]
+                   and r["clinic"] in (csv_clinic, src["data"].get("store"))), None) or \
+        next((r for r in reports if pd.Period(r["period"]["end"], "M") == src["month"]), None)
+    menu_df = src["data"]["breakdown"]
+    if target is None:
+        reports.append({"file": src["name"], "clinic": src["data"].get("store") or csv_clinic, "period": period,
+                        "values": {}, "breakdown": menu_df})
+    else:
+        frames = [f for f in (target.get("menu_csv"), menu_df) if f is not None]
+        target["menu_csv"] = pd.concat(frames).groupby("分類", as_index=False).agg({"グループ": "first", "人数": "sum", "売上": "sum"})
+        target["breakdown"] = target["menu_csv"]
+
 using_sample = not reports
-with st.sidebar:
-    if reports:
-        with st.expander(f"保存済みの実績（{len(reports)}件）"):
-            st.caption("院・月ごとに1件です。ここで削除すると、全員の画面から消えます。")
-            labels = {f"{r['clinic']}／{r['period']['end']:%Y年%m月}（{r['period']['start']:%m/%d}〜{r['period']['end']:%m/%d}）": r["id"] for r in reports}
-            to_delete = st.multiselect("削除する実績", list(labels), key=f"del_{ss.upload_ver}", label_visibility="collapsed",
-                                       placeholder="削除する実績を選択")
-            if st.button("選択した実績を削除", disabled=not to_delete):
-                delete_report_rows([labels[x] for x in to_delete])
-                ss.upload_ver += 1
-                st.rerun()
-
 if using_sample:
     for name, raw in sample_files(today, 2):
         ext = extract_file(raw, name, custom, CATALOG_SIG)
-        reports.append({"id": name, "file": name, "clinic": ext["clinic"], "period": ext["period"],
+        reports.append({"file": name, "clinic": ext["clinic"], "period": ext["period"],
                         "values": ext["values"], "breakdown": ext["breakdown"]})
 
 # 同じ院・同じ月の報告書が複数ある場合は、対象期間の最終日が一番新しいもの（月途中の累計なら最新）を使う
@@ -1319,9 +1263,7 @@ for rep in reports:
 used = list(latest.values())
 skipped = [r["file"] for r in reports if r not in used]
 
-# 離反率（＝離反者 ÷ 前月の純患者数）の元になる値をそろえる
-#   ・離反者は「離反者数」「離反者」「離反者(前月)」のどの名前で保存されていても使う
-#   ・前月の純患者数が保存されていなければ、同じ院の前月の報告書（月末まで）の「純患者数」を使う（報告書の値と一致）
+# 離反率（＝離反者 ÷ 前月の純患者数）の元になる値をそろえる（月間報告書のデータ用）
 CHURN_ALIASES = ("離反者数", "離反者", "離反者(前月)", "離反者（前月）")
 by_clinic_month = {(r["clinic"], r["month"]): r for r in used}
 for rep in used:
@@ -1340,26 +1282,41 @@ for rep in used:
 for msg in read_errors:
     st.error(msg)
 if not used:
-    st.error("読み込める月間報告書がありません。サイドバーから月間報告書のExcelをアップロードしてください。")
+    st.error("表示できるデータがありません。サイドバーからCSVまたは月間報告書をアップロードしてください。")
     st.stop()
 
 clinics = sorted({r["clinic"] for r in used})
 months = sorted({r["month"] for r in used})
 month_labels = [f"{m.year}年{m.month:02d}月" for m in months]
 with st.sidebar:
-    st.markdown("**🔎 表示する対象**")
-    # 表示する月・院は人ごとの選択（各自のブラウザだけに記憶し、共有しない）
-    if ss.get("sel_month_label") not in month_labels:
-        ss.sel_month_label = month_labels[-1]
-    month_label = st.selectbox("対象月", month_labels, key="sel_month_label")
-    sel_month = months[month_labels.index(month_label)]
+    st.markdown("**🔎 表示する期間**")
+    period_mode = st.segmented_control("表示のしかた", ["単月", "期間を合算"], default="単月", key="period_mode",
+                                       label_visibility="collapsed") or "単月"
+    if period_mode == "単月":
+        if ss.get("sel_month_label") not in month_labels:
+            ss.sel_month_label = month_labels[-1]
+        month_label = st.selectbox("表示する月", month_labels, key="sel_month_label")
+        sel_months = [months[month_labels.index(month_label)]]
+    else:
+        default_range = ss.get("sel_range")
+        if not (isinstance(default_range, (list, tuple)) and all(x in month_labels for x in default_range)):
+            ss.sel_range = (month_labels[max(0, len(month_labels) - 3)], month_labels[-1])
+        if len(month_labels) == 1:
+            st.caption("合算できる月が1つしかありません。")
+            sel_range = (month_labels[0], month_labels[0])
+        else:
+            sel_range = st.select_slider("表示する期間（〇月〜〇月を合算）", options=month_labels, key="sel_range")
+        i0, i1 = sorted((month_labels.index(sel_range[0]), month_labels.index(sel_range[1])))
+        sel_months = months[i0:i1 + 1]
+        month_label = f"{month_labels[i0]}〜{month_labels[i1]}" if i0 != i1 else month_labels[i0]
     clinic_options = ([ALL_CLINICS] if len(clinics) > 1 else []) + clinics
     if ss.get("sel_clinic") not in clinic_options:
         ss.sel_clinic = clinic_options[0]
     sel_clinic = st.selectbox("対象院", clinic_options, key="sel_clinic")
 
-catalog = build_catalog(custom)
+catalog = build_catalog(custom) + [sp for sp in csv_specs if sp["name"] not in {c["name"] for c in CATALOG}]
 spec_by_name = {s["name"]: s for s in catalog}
+n_months = len(sel_months)  # 期間を合算するときは、月間目標をこの月数ぶんにする（合計の項目のみ）
 
 
 def reports_for(month: pd.Period) -> list[dict]:
@@ -1367,7 +1324,7 @@ def reports_for(month: pd.Period) -> list[dict]:
 
 
 def aggregate_values(reps: list[dict]) -> dict[str, tuple[float, bool, str]]:
-    """院をまたいだ集計（合計の項目は足し算、率・平均の項目は取得できた院の平均）。"""
+    """院・月をまたいだ集計（合計の項目は足し算、率・平均の項目は取得できたものの平均）。"""
     out = {}
     for spec in catalog:
         vals = [r["values"].get(spec["name"], {"value": 0.0, "found": False, "where": ""}) for r in reps]
@@ -1376,10 +1333,10 @@ def aggregate_values(reps: list[dict]) -> dict[str, tuple[float, bool, str]]:
             value = float(sum(v["value"] for v in vals))
         else:
             value = float(np.mean([v["value"] for v in found])) if found else 0.0
-        where = found[0]["where"] if len(reps) == 1 and found else ("" if not found else f"{len(found)}/{len(reps)}院で取得")
+        where = found[0]["where"] if len(reps) == 1 and found else ("" if not found else f"{len(found)}/{len(reps)}件で取得")
         out[spec["name"]] = (value, bool(found), where)
     for spec in catalog:
-        # 割合・単価の項目：複数院は「合計どうしの割合」。保存済みデータに値が無い場合も、元になる項目から計算する
+        # 割合・単価の項目：複数件は「合計どうしの割合」。値が無い場合も、元になる項目から計算する
         if spec.get("ratio_of") and (len(reps) > 1 or not out[spec["name"]][1]):
             (nv, nf, _), (dv, df_, _) = (out.get(n, (0.0, False, "")) for n in spec["ratio_of"])
             if nf and df_ and dv:
@@ -1388,20 +1345,27 @@ def aggregate_values(reps: list[dict]) -> dict[str, tuple[float, bool, str]]:
 
 
 def breakdown_for(reps: list[dict]) -> pd.DataFrame:
-    frames = [r["breakdown"] for r in reps if not r["breakdown"].empty]
+    frames = [r["breakdown"].reindex(columns=["分類", "グループ", "人数", "売上"]) for r in reps if not r["breakdown"].empty]
     if not frames:
-        return pd.DataFrame(columns=["分類", "人数", "売上"])
-    return pd.concat(frames).groupby("分類", as_index=False)[["人数", "売上"]].sum()
+        return pd.DataFrame(columns=["分類", "グループ", "人数", "売上"])
+    return pd.concat(frames).groupby("分類", as_index=False).agg({"グループ": "first", "人数": "sum", "売上": "sum"})
 
 
-month_reps = reports_for(sel_month)
-prev_reps = reports_for(sel_month - 1)
+month_reps = [r for m in sel_months for r in reports_for(m)]
+prev_reps = reports_for(sel_months[0] - 1)
+if not month_reps:
+    st.warning("選んだ期間・院のデータがありません。サイドバーで表示する期間や院を変えてください。")
+    st.stop()
 period_start = min(r["period"]["start"] for r in month_reps)
 period_end = max(r["period"]["end"] for r in month_reps)
-dim = calendar.monthrange(sel_month.year, sel_month.month)[1]
-month_start = date(sel_month.year, sel_month.month, 1)
-covered_days = (period_end - month_start).days + 1 if period_start <= month_start else (period_end - period_start).days + 1
-ratio = min(max(covered_days / dim, 0.0), 1.0)
+last_month = sel_months[-1]
+dim = calendar.monthrange(last_month.year, last_month.month)[1]
+last_reps = reports_for(last_month)
+last_start = date(last_month.year, last_month.month, 1)
+last_end = max((r["period"]["end"] for r in last_reps), default=month_bounds(last_month.year, last_month.month)[1])
+covered_days = (last_end - last_start).days + 1
+last_ratio = min(max(covered_days / dim, 0.0), 1.0)
+ratio = (n_months - 1 + last_ratio) / n_months  # 期間合算では、最後の月の経過分だけを日割りする
 values = aggregate_values(month_reps)
 prev_values = aggregate_values(prev_reps) if prev_reps else {}
 menu_now = breakdown_for(month_reps)
@@ -1446,9 +1410,13 @@ def auto_menu_groups(names) -> dict[str, str]:
     return out
 
 
-ss.menu_groups = dict(config.get("menu_groups", {}))  # 手動で変更したグループ分けだけを共有ファイルに保存
+ss.menu_groups = dict(config.get("menu_groups", {}))  # 手動で変更したグループ分けだけを保存
 all_menu_names = sorted(set(menu_now["分類"]) | set(menu_prev["分類"]))
-auto_groups = auto_menu_groups(all_menu_names)
+csv_groups = {
+    row["分類"]: row["グループ"] for frame in (menu_prev, menu_now) for _, row in frame.iterrows()
+    if isinstance(row.get("グループ"), str) and row.get("グループ")
+}  # メニュー別CSVの「カテゴリー」
+auto_groups = {**auto_menu_groups(all_menu_names), **csv_groups}
 menu_groups = {n: ss.menu_groups.get(n) or auto_groups[n] for n in all_menu_names}
 
 
@@ -1463,8 +1431,10 @@ def resolve_group_target(targets: dict, group: str, members: list[dict], field: 
     return float(sum(kids)) if kids else None
 
 
-def menu_tree() -> list[dict]:
-    """親メニューごとの合計（売上・件数）・目標・内訳。"""
+def menu_tree(scale: int = 1) -> list[dict]:
+    """親メニューごとの合計（売上・件数）・目標・内訳。scale は期間合算の月数（月間目標 × 月数）。"""
+    sales_targets = {k: v * scale for k, v in ss.menu_targets.items() if v}
+    count_targets = {k: v * scale for k, v in ss.menu_count_targets.items() if v}
     now = menu_now.set_index("分類") if not menu_now.empty else pd.DataFrame(columns=["人数", "売上"])
     prev = menu_prev.set_index("分類") if not menu_prev.empty else pd.DataFrame(columns=["人数", "売上"])
     groups: dict[str, list[dict]] = {}
@@ -1476,8 +1446,8 @@ def menu_tree() -> list[dict]:
                 "売上": float(now["売上"].get(name, 0.0)),
                 "前月": float(prev["売上"][name]) if name in prev.index else np.nan,
                 "前月件数": float(prev["人数"][name]) if name in prev.index else np.nan,
-                "目標": ss.menu_targets.get(name),          # 売上目標
-                "件数目標": ss.menu_count_targets.get(name),
+                "目標": sales_targets.get(name),          # 売上目標
+                "件数目標": count_targets.get(name),
             }
         )
     tree = []
@@ -1495,7 +1465,7 @@ def menu_tree() -> list[dict]:
                 "売上": sum(m["売上"] for m in members),
                 "前月": sum(prevs) if prevs else np.nan,
                 "前月件数": sum(prev_counts) if prev_counts else np.nan,
-                "目標": resolve_group_target(ss.menu_targets, group, members, "目標", multi),
+                "目標": resolve_group_target(sales_targets, group, members, "目標", multi),
                 # 件数は内訳ごとに管理する（親メニューの合算はしない）。単独メニューはその分類の件数目標
                 "件数目標": None if multi else members[0]["件数目標"],
             }
@@ -1510,6 +1480,8 @@ def build_kpi_table() -> pd.DataFrame:
     for spec in catalog:
         value, found, where = values[spec["name"]]
         target = ss.kpi_targets.get(spec["name"])
+        if target and spec["agg"] == SUM:
+            target = target * n_months  # 期間合算：月間目標 × 月数
         res = judge(value, target, found, spec["agg"], ratio, spec.get("lower_better", False))
         rows.append(
             {
@@ -1534,21 +1506,16 @@ def build_kpi_table() -> pd.DataFrame:
     return table.sort_values("_o", kind="stable").drop(columns="_o").reset_index(drop=True)
 
 
-period_text = f"{period_start:%Y/%m/%d}〜{period_end:%m/%d}（{covered_days}/{dim}日・{ratio:.0%}経過）"
+period_text = (
+    f"{period_start:%Y/%m/%d}〜{period_end:%m/%d}（{covered_days}/{dim}日・{ratio:.0%}経過）" if n_months == 1
+    else f"{sel_months[0].year}年{sel_months[0].month}月〜{sel_months[-1].year}年{sel_months[-1].month}月（{n_months}ヶ月を合算・目標も{n_months}ヶ月分）"
+)
 
 
 # ===========================================================================
 # ページ：ダッシュボード
 # ===========================================================================
-@st.fragment(run_every=30)
-def watch_shared_updates():
-    """30秒ごとに共有ファイルを確認し、他の人がアップロード・保存していたら画面を最新の内容で描き直す。"""
-    if shared_signature() != ss.data_sig:
-        st.rerun(scope="app")
-
-
 def page_dashboard():
-    watch_shared_updates()
     kpi = build_kpi_table()
     by_name = kpi.set_index("項目")
     st.markdown("<div class='page-title'>📊 月間KPIダッシュボード</div>", unsafe_allow_html=True)
@@ -1559,7 +1526,7 @@ def page_dashboard():
         unsafe_allow_html=True,
     )
     if using_sample:
-        st.info("サンプルを表示中です。サイドバーから月間報告書（.xls / .xlsx）をアップロードしてください。", icon="🧪")
+        st.info("サンプルを表示中です。サイドバーから店舗分析データのCSVや月間報告書をアップロードしてください。", icon="🧪")
 
     # ---- 全体の状況（ひと目で分かる要約） ----
     judged = kpi[kpi["判定"].isin([ST_DONE, ST_ONTRACK, ST_BEHIND])]
@@ -1568,7 +1535,7 @@ def page_dashboard():
         f"<span class='chip'><span class='dot' style='background:{STATUS_STYLE[s][0]}'></span> {s}<b>{counts[s]}</b></span>"
         for s in (ST_DONE, ST_ONTRACK, ST_BEHIND)
     )
-    n_missing = int((kpi["判定"] == ST_MISSING).sum())
+    n_missing = int(((kpi["判定"] == ST_MISSING) & kpi["目標"].notna()).sum())  # 目標を設定したのに値が取れていない項目だけ数える
     if n_missing:
         chips += f"<span class='chip' style='opacity:.7'>⚠️ 未検出<b>{n_missing}</b></span>"
     st.markdown(f"<div class='chips'>{chips}</div>", unsafe_allow_html=True)
@@ -1658,7 +1625,7 @@ def page_dashboard():
     if menu_now.empty:
         st.caption("「施術分類」の一覧が報告書から取得できませんでした。")
     else:
-        tree = menu_tree()
+        tree = menu_tree(scale=n_months)
         total = sum(g["売上"] for g in tree) or 1.0
         def is_active(g):
             return g["売上"] > 0 or g["人数"] > 0 or bool(g["目標"]) or bool(g["件数目標"])
@@ -1729,8 +1696,8 @@ def page_dashboard():
                 .properties(height=232),
                 width="stretch",
             )
-        if sel_month == months[-1] and ratio < 1:
-            st.caption(f"※ {month_label} は月の途中（{ratio:.0%}経過）までの実績です。")
+        if sel_months[-1] == months[-1] and last_ratio < 1:
+            st.caption(f"※ {sel_months[-1].month}月は月の途中（{last_ratio:.0%}経過）までの実績です。")
 
     with st.expander(f"読み込んだ報告書（{len(reports)}件）"):
         if skipped:
@@ -1759,8 +1726,9 @@ def page_dashboard():
 def page_targets():
     st.markdown("<div class='page-title'>🎯 目標設定</div>", unsafe_allow_html=True)
     st.markdown(
-        "<div class='page-meta'>ここで保存した月間目標は共有データに保存され、全員のダッシュボード（カード・一覧・メニュー別・推移）で使われます。"
-        f"参考として {month_label}（{sel_clinic}）と前月の実績を表示しています。</div>",
+        "<div class='page-meta'>ここで保存した<b>月間</b>目標は、この画面のダッシュボード（カード・一覧・メニュー別・推移）で使われます"
+        "（他の人とは共有されません）。期間を合算して表示するときは、合計の項目の目標が月数ぶんになります。"
+        f"参考として {month_label}（{sel_clinic}）の実績を表示しています。</div>",
         unsafe_allow_html=True,
     )
     num = st.column_config.NumberColumn
@@ -1882,19 +1850,17 @@ def page_targets():
 
         new_sales = collect("売上目標", ss.menu_targets)
         new_count = collect("件数目標", ss.menu_count_targets, parents=False)  # 件数は親メニューに保存しない
-        # 共有データ（Supabase または data/targets.json）へ保存：この画面で変更した目標だけを、最新の内容に重ねて保存する
-        apply_diff("targets", "kpi", ss.kpi_targets, new_kpi)
-        apply_diff("targets", "menu_sales", ss.menu_targets, new_sales)
-        apply_diff("targets", "menu_count", ss.menu_count_targets, new_count)
+        # このブラウザのセッションに保存（他の人とは共有しない）
+        store_put("targets", {"kpi": new_kpi, "menu_sales": new_sales, "menu_count": new_count})
         saved_now = store_get("targets")
         ss.target_ver += 1
         ss.saved_notice = (
-            f"目標を共有データに保存しました（KPI {len(saved_now.get('kpi', {}))}項目・"
+            f"目標を保存しました（KPI {len(saved_now.get('kpi', {}))}項目・"
             f"メニューの売上目標 {len(saved_now.get('menu_sales', {}))}件・件数目標 {len(saved_now.get('menu_count', {}))}件）。"
         )
         st.rerun()
     if notice := ss.pop("saved_notice", None):
-        st.success(notice + " 全員のダッシュボードに反映されます。", icon="✅")
+        st.success(notice + " ダッシュボードに反映されています。", icon="✅")
         st.page_link(dashboard_page, label="ダッシュボードで確認する", icon="📊")
 
     with st.expander("🗂 メニューのグループ分けを調整"):
@@ -1926,47 +1892,34 @@ def page_targets():
                     parent = str(r["親メニュー"] or "").strip()
                     if parent and parent != auto_groups[r["分類"]]:
                         overrides[r["分類"]] = parent
-            apply_diff("config", "menu_groups", ss.menu_groups, overrides)
+            save_section("config", "menu_groups", overrides)
             ss.target_ver += 1
             st.rerun()
 
-    if supabase_settings():
-        local = legacy_local_data()
-        n_local = len(local["files"]) + len(local["reports"])
-        if local["targets"] or local["config"] or n_local:
-            with st.expander("📦 このPCのデータをクラウド（Supabase）へ移行"):
-                st.caption(
-                    f"このPCに、以前の版で保存した目標（{'あり' if local['targets'] else 'なし'}）・設定（{'あり' if local['config'] else 'なし'}）・"
-                    f"報告書 {n_local}件があります。移行すると、目標・設定はクラウドにまだ無い場合だけコピーし、"
-                    "報告書は数値を取り出して保存します（同じ院・同じ月は対象期間が新しい方を残します）。"
-                )
-                if st.button("クラウドへ移行する", type="primary"):
-                    done = {"new": 0, "update": 0, "skip": 0}
-                    failed = []
-                    with st.spinner("移行しています…"):
-                        if local["targets"] and not store_get("targets"):
-                            store_put("targets", local["targets"])
-                        if local["config"] and not store_get("config"):
-                            store_put("config", {k: v for k, v in local["config"].items() if k != "manual_periods"})
-                        manual = local["config"].get("manual_periods", {})
-                        for f in local["files"]:
-                            try:
-                                ext = extract_file(f.read_bytes(), f.name, custom, CATALOG_SIG)
-                            except (OSError, ValueError) as e:
-                                failed.append(f"{f.name}（{e}）")
-                                continue
-                            period = ext["period"] or (
-                                {"start": date.fromisoformat(manual[f.name][0]), "end": date.fromisoformat(manual[f.name][1])} if f.name in manual else None
-                            )
-                            if period is None:
-                                failed.append(f"{f.name}（対象期間が不明）")
-                                continue
-                            done[save_report_row(report_row(f.name, ext, period))] += 1
-                        for row in local["reports"].values():
-                            done[save_report_row({**row, "uploaded_at": now_iso()})] += 1
-                    st.success(f"移行しました：報告書 新規 {done['new']}件・更新 {done['update']}件・見送り {done['skip']}件", icon="✅")
-                    for msg in failed:
-                        st.warning(f"移行できませんでした：{msg}")
+    with st.expander("💾 目標の書き出し・読み込み・リセット"):
+        st.caption("目標はこの画面にだけ保存され、再読み込みすると初期値に戻ります。ファイルに書き出しておけば、次回読み込んで続きから使えます。")
+        backup = json.dumps({"targets": store_get("targets") or {"kpi": ss.kpi_targets, "menu_sales": ss.menu_targets,
+                                                                 "menu_count": ss.menu_count_targets},
+                             "config": store_get("config")}, ensure_ascii=False, indent=2)
+        e1, e2 = st.columns(2)
+        e1.download_button("目標をファイルに書き出す", backup.encode("utf-8"), file_name="kpi_targets.json",
+                           mime="application/json", width="stretch")
+        if e2.button("目標を初期値に戻す", width="stretch"):
+            store_put("targets", {})
+            ss.target_ver += 1
+            st.rerun()
+        loaded = st.file_uploader("書き出した目標ファイル（kpi_targets.json）を読み込む", type=["json"], key=f"targets_file_{ss.target_ver}")
+        if loaded is not None:
+            try:
+                data = json.loads(loaded.getvalue().decode("utf-8"))
+                store_put("targets", data.get("targets", {}))
+                if data.get("config"):
+                    store_put("config", data["config"])
+                ss.target_ver += 1
+                ss.saved_notice = "目標ファイルを読み込みました。"
+                st.rerun()
+            except (ValueError, AttributeError):
+                st.error("目標ファイルとして読み込めませんでした。")
 
     with st.expander("⚙️ 抽出項目の追加・調整（上級者向け）"):
         st.caption(
@@ -1995,7 +1948,7 @@ def page_targets():
                 },
             )
             if st.form_submit_button("追加項目を保存"):
-                update_shared("config", {"custom_items": custom_df.where(custom_df.notna(), None).to_dict("records")})
+                update_store("config", {"custom_items": custom_df.where(custom_df.notna(), None).to_dict("records")})
                 st.rerun()
 
 

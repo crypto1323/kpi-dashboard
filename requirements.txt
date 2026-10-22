@@ -5,4 +5,3 @@ numpy==2.5.4
 altair==6.3.0
 openpyxl==3.1.5   # .xlsx の読み込み
 xlrd==2.0.2       # .xls の読み込み（CRM の月間報告書）
-supabase==2.33.0  # クラウドのデータベース（Supabase）への保存
