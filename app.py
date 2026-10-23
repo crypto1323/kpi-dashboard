@@ -642,15 +642,15 @@ FILE_PERIOD_RE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})_(\d{4})-(\d{1,2})-(\d{
 
 # 9つのKPIなど、ダッシュボードの項目 ← 店舗分析CSVの項目名（単位の（ ）を除いた名前）
 CSV_ITEM_MAP = {
-    "窓口売上合計": ["売上合計"],
-    "初診率（新患1→2回目）": ["初診率"],
+    "窓口売上合計": ["合計売上金額"],                 # 「合計売上」のカード
+    "初診率（新患1→2回目）": ["新規リピート率"],      # 「初診率」のカード
     "純患者数": ["カルテ総数"],
     "新患数": ["新患数"],
     "再診数": ["再診数"],
     "離反率": ["離反率"],
     "1日平均来院数": ["総来平均"],
     "平均通院回数": ["平均通院日数"],
-    "全体平均単価": ["1回あたりの単価"],
+    "全体平均単価": ["1人あたりの単価", "一人当たりの単価", "一人あたりの単価", "1人当たりの単価"],  # 「単価」のカード
     "延べ来院数": ["総来患数(のべ)", "総来患数"],
     "保険売上": ["保険合計"],
     "自費売上": ["自費合計"],
@@ -752,9 +752,9 @@ def monthly_csv_records(parsed: dict, filename: str, clinic: str, today: date) -
     """店舗分析CSV → 月ごとの実績（records）と、ダッシュボードに追加する項目（specs）。"""
     first_by_name: dict[str, dict] = {}
     for it in parsed["items"]:
-        first_by_name.setdefault(it["name"], it)
-    mapped_labels = {label for labels in CSV_ITEM_MAP.values() for label in labels}
-    extra = [it for name, it in first_by_name.items() if it["section"] in CSV_EXTRA_SECTIONS and name not in mapped_labels]
+        first_by_name.setdefault(norm_text(it["name"]), it)  # 全角半角・空白の違いを無視して照合する
+    mapped_labels = {norm_text(label) for labels in CSV_ITEM_MAP.values() for label in labels}
+    extra = [it for key, it in first_by_name.items() if it["section"] in CSV_EXTRA_SECTIONS and key not in mapped_labels]
     specs = [
         {
             "name": it["name"],
@@ -770,7 +770,7 @@ def monthly_csv_records(parsed: dict, filename: str, clinic: str, today: date) -
         month = pd.Period(f"{parsed['year']}-{mo:02d}", "M")
         values = {}
         for key, labels in CSV_ITEM_MAP.items():
-            it = next((first_by_name[l] for l in labels if l in first_by_name), None)
+            it = next((first_by_name[norm_text(l)] for l in labels if norm_text(l) in first_by_name), None)
             v = it["values"].get(mo) if it else None
             values[key] = {"value": float(v) if v is not None else 0.0, "found": v is not None,
                            "where": f"{it['name']}（{mo}月）" if it and v is not None else ""}
@@ -778,7 +778,7 @@ def monthly_csv_records(parsed: dict, filename: str, clinic: str, today: date) -
             v = it["values"].get(mo)
             values[it["name"]] = {"value": float(v) if v is not None else 0.0, "found": v is not None,
                                   "where": f"{it['name']}（{mo}月）" if v is not None else ""}
-        if not values["窓口売上合計"]["found"]:  # 売上が空の月（まだ来ていない月）は読み込まない
+        if not values["窓口売上合計"]["found"]:  # 合計売上が空の月（まだ来ていない月）は読み込まない
             continue
         records.append({"file": filename, "clinic": clinic, "period": month_period(month, today), "values": values,
                         "breakdown": pd.DataFrame(columns=["分類", "グループ", "人数", "売上"])})
@@ -1870,7 +1870,8 @@ def page_targets():
             "違うグループに入れたい分類は「親メニュー」を書き換えて保存してください（新しい名前を入れると新しいグループになります）。"
         )
         grp_df = pd.DataFrame(
-            {"分類": all_menu_names, "自動の親メニュー": [auto_groups[n] for n in all_menu_names], "親メニュー": [menu_groups[n] for n in all_menu_names]}
+            {"分類": all_menu_names, "自動の親メニュー": [auto_groups[n] for n in all_menu_names], "親メニュー": [menu_groups[n] for n in all_menu_names]},
+            dtype="object",  # メニューが0件のときも文字の列として扱う
         )
         with st.form("group_form", border=False):
             grp_edit = st.data_editor(
