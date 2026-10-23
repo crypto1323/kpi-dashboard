@@ -863,6 +863,7 @@ CSS = """
 .dot {width:8px; height:8px; border-radius:50%; display:inline-block; flex:none;}
 .kpi-value {font-size:1.4rem; font-weight:700; line-height:1.3; margin-top:4px;}
 .kpi-card.small .kpi-value {font-size:1.05rem;}
+.kpi-alt {font-size:.72rem; opacity:.65; margin-top:-2px;}
 .kpi-grid.kpi9 {grid-template-columns:repeat(5, minmax(0, 1fr)); gap:10px;}
 .kpi-grid.kpi9 .kpi-card {padding:10px 12px 8px;}
 .kpi-grid.kpi9 .kpi-value {font-size:1.2rem;}
@@ -939,7 +940,9 @@ def kpi_card(row: pd.Series, ratio: float, small: bool = False, label: str | Non
     return (
         f"<div class='kpi-card{' small' if small else ''}'>"
         f"<div class='kpi-head'><span class='dot' style='background:{color}'></span>{label or row['項目']}</div>"
-        f"<div class='kpi-value'>{fmt(row['現状'], unit) if row['取得'] else '—'}</div>{gap}"
+        f"<div class='kpi-value'>{fmt(row['現状'], unit) if row['取得'] else '—'}</div>"
+        + (f"<div class='kpi-alt'>{row['別表示']}</div>" if row.get("別表示") else "")
+        + f"{gap}"
         f"<div class='kpi-bar'><div class='fill' style='width:{width:.1f}%;background:{color}'></div>{pace}</div>"
         f"<div class='kpi-meta'>{meta}</div></div>"
     )
@@ -1160,59 +1163,78 @@ def add_source(kind: str, name: str, raw: bytes) -> str:
 
 KIND_LABEL = {"monthly": "📈 月次推移CSV", "report": "📄 月間報告書", "menu": "🍽️ メニュー別CSV"}
 
+UPLOAD_AREAS = [
+    {
+        "kind": "total", "kinds": ("monthly", "report"), "title": "① 全体の数値",
+        "label": "店舗分析データCSV（月次推移）・月間報告書Excel", "types": ["csv", "xls", "xlsx"],
+        "help": "「店舗分析データ (月次推移)」のCSV（縦に項目名、横に1月〜12月）や、月間報告書のExcelを読み込みます。",
+    },
+    {
+        "kind": "menu", "kinds": ("menu",), "title": "② メニュー別の数値",
+        "label": "商品売上分析CSV", "types": ["csv"],
+        "help": "商品名・カテゴリー・販売数・売上金額の列があるCSV。対象期間はファイル名（例：_2026-10-01_2026-10-11）から読み取ります。",
+    },
+]
+
+
+def month_choice(sid: str, src: dict) -> None:
+    """月間報告書・メニュー別CSVの対象月（ファイルから読み取れないときは選んでもらう）。"""
+    choices = [pd.Period(today, "M") - i for i in range(24)]
+    current = src["month"] or choices[0]
+    if current not in choices:
+        choices.append(current)
+    src["month"] = st.selectbox(
+        "対象月" + ("" if src["month_detected"] else "（ファイルから読み取れないため選択）"),
+        choices, index=choices.index(current), format_func=lambda m: f"{m.year}年{m.month:02d}月", key=f"month_{sid}",
+    )
+
+
 with st.sidebar:
     st.markdown("**📂 データの読み込み**")
     st.caption("読み込んだデータと目標は、この画面だけで使われます（他の人には見えません）。再読み込みすると消えます。")
-    up_total = st.file_uploader(
-        "① 全体の数値（店舗分析データCSV・月間報告書Excel）",
-        type=["csv", "xls", "xlsx"], accept_multiple_files=True, key=f"up_total_{ss.upload_ver}",
-        help="「店舗分析データ (月次推移)」のCSV（縦に項目名、横に1月〜12月）や、月間報告書のExcelを読み込みます。",
-    )
-    up_menu = st.file_uploader(
-        "② メニュー別の数値（商品売上分析CSV）",
-        type=["csv"], accept_multiple_files=True, key=f"up_menu_{ss.upload_ver}",
-        help="商品名・カテゴリー・販売数・売上金額の列があるCSV。対象期間はファイル名（例：_2026-10-01_2026-10-11）から読み取ります。",
-    )
-    if up_total or up_menu:
-        msgs, errors = [], []
-        with st.spinner("読み込んでいます…"):
-            for kind, files in (("total", up_total or []), ("menu", up_menu or [])):
-                for u in files:
-                    try:
-                        msgs.append(add_source(kind, u.name, u.getvalue()))
-                    except ValueError as e:
-                        errors.append(f"「{u.name}」：{e}")
-        ss.upload_notice, ss.upload_errors = msgs, errors
-        ss.upload_ver += 1  # アップロード欄を空に戻す
-        st.rerun()
-    for msg in ss.pop("upload_notice", []):
-        st.success(msg, icon="✅")
-    for msg in ss.pop("upload_errors", []):
-        st.error(msg)
+    for area in UPLOAD_AREAS:
+        with st.container(border=True):
+            st.markdown(f"**{area['title']}**")
+            files = st.file_uploader(
+                area["label"], type=area["types"], accept_multiple_files=True,
+                key=f"up_{area['kind']}_{ss.upload_ver}", help=area["help"],
+            )
+            if files:
+                msgs, errors = [], []
+                with st.spinner("読み込んでいます…"):
+                    for u in files:
+                        try:
+                            msgs.append(add_source(area["kind"], u.name, u.getvalue()))
+                        except ValueError as e:
+                            errors.append(f"「{u.name}」：{e}")
+                ss[f"notice_{area['kind']}"], ss[f"errors_{area['kind']}"] = msgs, errors
+                ss.upload_ver += 1  # アップロード欄を空に戻す
+                st.rerun()
+            for msg in ss.pop(f"notice_{area['kind']}", []):
+                st.success(msg, icon="✅")
+            for msg in ss.pop(f"errors_{area['kind']}", []):
+                st.error(msg)
 
-    if ss.sources:
-        st.markdown(f"**読み込み済み（{len(ss.sources)}件）**")
-        for sid, src in list(ss.sources.items()):
-            with st.container(border=True):
-                st.markdown(f"{KIND_LABEL[src['kind']]}<br><small>{html.escape(src['name'])}</small>", unsafe_allow_html=True)
-                if st.button("このデータを削除", icon=":material/delete:", key=f"del_{sid}", type="tertiary"):
-                    del ss.sources[sid]
+            # この欄で読み込み済みのファイル（ファイルごとに削除できる）
+            loaded = [(sid, src) for sid, src in ss.sources.items() if src["kind"] in area["kinds"]]
+            if loaded:
+                st.markdown(f"<small><b>✅ 読み込み済み（{len(loaded)}件）</b></small>", unsafe_allow_html=True)
+                for sid, src in loaded:
+                    c1, c2 = st.columns([5, 1], vertical_alignment="center")
+                    c1.markdown(f"<small>{KIND_LABEL[src['kind']]}<br>{html.escape(src['name'])}</small>", unsafe_allow_html=True)
+                    if c2.button("", icon=":material/close:", key=f"del_{sid}", help="このファイルを削除", type="tertiary"):
+                        del ss.sources[sid]
+                        st.rerun()
+                    if src["kind"] in ("menu", "report"):
+                        month_choice(sid, src)
+                if st.button("この欄をリセット", icon=":material/delete_sweep:", key=f"reset_{area['kind']}", width="stretch",
+                             help="この欄で読み込んだデータをすべて削除します"):
+                    for sid, _ in loaded:
+                        ss.sources.pop(sid, None)
+                    ss.upload_ver += 1
                     st.rerun()
-                if src["kind"] in ("menu", "report"):
-                    choices = [pd.Period(today, "M") - i for i in range(24)]
-                    current = src["month"] or choices[0]
-                    if current not in choices:
-                        choices.append(current)
-                    picked = st.selectbox(
-                        "対象月" + ("" if src["month_detected"] else "（ファイルから読み取れないため選択）"),
-                        choices, index=choices.index(current), format_func=lambda m: f"{m.year}年{m.month:02d}月",
-                        key=f"month_{sid}",
-                    )
-                    src["month"] = picked
-        if st.button("すべて削除", icon=":material/delete_sweep:", width="stretch", help="読み込んだデータをすべて削除します"):
-            ss.sources = {}
-            ss.upload_ver += 1
-            st.rerun()
+            else:
+                st.caption("まだ読み込んでいません")
 
 # ---- 読み込んだファイル → 月ごとの実績 ----
 csv_clinic = next((src["data"]["store"] for src in ss.sources.values() if src["kind"] == "menu" and src["data"].get("store")), None) \
@@ -1288,35 +1310,70 @@ if not used:
 clinics = sorted({r["clinic"] for r in used})
 months = sorted({r["month"] for r in used})
 month_labels = [f"{m.year}年{m.month:02d}月" for m in months]
+MODE_SINGLE, MODE_RANGE = "単月", "期間を指定"
+BASIS_SUM, BASIS_AVG = "合算", "月平均"
+clinic_options = ([ALL_CLINICS] if len(clinics) > 1 else []) + clinics
+
+
+def default_view() -> dict:
+    return {"mode": MODE_SINGLE, "month": month_labels[-1],
+            "range": (month_labels[max(0, len(month_labels) - 3)], month_labels[-1]),
+            "basis": BASIS_SUM, "clinic": clinic_options[0]}
+
+
+def valid_view(v) -> bool:
+    return (isinstance(v, dict) and v.get("month") in month_labels and v.get("clinic") in clinic_options
+            and all(x in month_labels for x in v.get("range", ())))
+
+
+if not valid_view(ss.get("applied_view")):
+    ss.applied_view = default_view()
+view_applied = ss.applied_view
+
 with st.sidebar:
-    st.markdown("**🔎 表示する期間**")
-    period_mode = st.segmented_control("表示のしかた", ["単月", "期間を合算"], default="単月", key="period_mode",
-                                       label_visibility="collapsed") or "単月"
-    if period_mode == "単月":
-        if ss.get("sel_month_label") not in month_labels:
-            ss.sel_month_label = month_labels[-1]
-        month_label = st.selectbox("表示する月", month_labels, key="sel_month_label")
-        sel_months = [months[month_labels.index(month_label)]]
-    else:
-        default_range = ss.get("sel_range")
-        if not (isinstance(default_range, (list, tuple)) and all(x in month_labels for x in default_range)):
-            ss.sel_range = (month_labels[max(0, len(month_labels) - 3)], month_labels[-1])
-        if len(month_labels) == 1:
-            st.caption("合算できる月が1つしかありません。")
-            sel_range = (month_labels[0], month_labels[0])
+    with st.container(border=True):
+        st.markdown("**🔎 表示する期間**")
+        # 入力欄の初期値は「いま画面に反映されている設定」
+        for key, value in (("pv_mode", view_applied["mode"]), ("pv_month", view_applied["month"]),
+                           ("pv_range", tuple(view_applied["range"])), ("pv_basis", view_applied["basis"]),
+                           ("pv_clinic", view_applied["clinic"])):
+            if key not in ss or (key == "pv_month" and ss[key] not in month_labels) or (key == "pv_clinic" and ss[key] not in clinic_options) \
+                    or (key == "pv_range" and not all(x in month_labels for x in ss[key])):
+                ss[key] = value
+        mode = st.segmented_control("表示のしかた", [MODE_SINGLE, MODE_RANGE], key="pv_mode", label_visibility="collapsed") or MODE_SINGLE
+        if mode == MODE_SINGLE:
+            st.selectbox("表示する月", month_labels, key="pv_month")
+        elif len(month_labels) == 1:
+            st.caption("期間を指定できる月が1つしかありません。")
         else:
-            sel_range = st.select_slider("表示する期間（〇月〜〇月を合算）", options=month_labels, key="sel_range")
-        i0, i1 = sorted((month_labels.index(sel_range[0]), month_labels.index(sel_range[1])))
-        sel_months = months[i0:i1 + 1]
-        month_label = f"{month_labels[i0]}〜{month_labels[i1]}" if i0 != i1 else month_labels[i0]
-    clinic_options = ([ALL_CLINICS] if len(clinics) > 1 else []) + clinics
-    if ss.get("sel_clinic") not in clinic_options:
-        ss.sel_clinic = clinic_options[0]
-    sel_clinic = st.selectbox("対象院", clinic_options, key="sel_clinic")
+            st.select_slider("表示する期間（〇月〜〇月）", options=month_labels, key="pv_range")
+            st.radio("期間の数値の見方", [BASIS_SUM, BASIS_AVG], key="pv_basis", horizontal=True,
+                     help="合算＝期間の合計（目標も月数ぶん）／月平均＝1ヶ月あたりの平均（目標は月間目標のまま）。カードには、もう一方の値も小さく表示します。")
+        st.selectbox("対象院", clinic_options, key="pv_clinic")
+        pending = {"mode": mode, "month": ss.pv_month, "range": tuple(ss.pv_range), "basis": ss.pv_basis, "clinic": ss.pv_clinic}
+        changed = {k: pending[k] for k in pending} != {k: (tuple(v) if k == "range" else v) for k, v in view_applied.items()}
+        if st.button("反映", icon=":material/refresh:", type="primary", width="stretch", disabled=not changed,
+                     help="選んだ月・期間でダッシュボードの数値を更新します"):
+            ss.applied_view = pending
+            st.rerun()
+        if changed:
+            st.caption("⚠️ まだ反映されていません。「反映」を押すとダッシュボードが更新されます。")
+
+# 反映済みの設定で表示する
+sel_clinic = view_applied["clinic"]
+if view_applied["mode"] == MODE_SINGLE or len(month_labels) == 1:
+    month_label = view_applied["month"]
+    sel_months = [months[month_labels.index(month_label)]]
+else:
+    i0, i1 = sorted(month_labels.index(x) for x in view_applied["range"])
+    sel_months = months[i0:i1 + 1]
+    month_label = f"{month_labels[i0]}〜{month_labels[i1]}" if i0 != i1 else month_labels[i0]
+avg_mode = view_applied["basis"] == BASIS_AVG and len(sel_months) > 1  # 期間の「月平均」で表示する
 
 catalog = build_catalog(custom) + [sp for sp in csv_specs if sp["name"] not in {c["name"] for c in CATALOG}]
 spec_by_name = {s["name"]: s for s in catalog}
-n_months = len(sel_months)  # 期間を合算するときは、月間目標をこの月数ぶんにする（合計の項目のみ）
+n_months = len(sel_months)
+target_scale = 1 if avg_mode else n_months  # 合算は 月間目標 × 月数、月平均は月間目標のまま（合計の項目のみ）
 
 
 def reports_for(month: pd.Period) -> list[dict]:
@@ -1366,10 +1423,36 @@ last_end = max((r["period"]["end"] for r in last_reps), default=month_bounds(las
 covered_days = (last_end - last_start).days + 1
 last_ratio = min(max(covered_days / dim, 0.0), 1.0)
 ratio = (n_months - 1 + last_ratio) / n_months  # 期間合算では、最後の月の経過分だけを日割りする
-values = aggregate_values(month_reps)
+sum_values = aggregate_values(month_reps)  # 期間の合算（率・平均の項目は月の平均）
+
+
+def per_month(vals: dict) -> dict:
+    """合計の項目を月数で割った「月平均」。率・平均の項目はそのまま。"""
+    out = dict(vals)
+    for spec in catalog:
+        if spec.get("combine", spec["agg"]) == SUM and spec["name"] in out:
+            v, f, w = out[spec["name"]]
+            out[spec["name"]] = (v / n_months, f, w)
+    for spec in catalog:  # 割合・単価は、月平均どうしで計算しても合算と同じ値になる
+        if spec.get("ratio_of") and spec["name"] in vals:
+            out[spec["name"]] = vals[spec["name"]]
+    return out
+
+
+avg_values = per_month(sum_values) if n_months > 1 else sum_values
+values = avg_values if avg_mode else sum_values
+alt_values = (sum_values if avg_mode else avg_values) if n_months > 1 else {}  # カードに小さく出す、もう一方の見方
+alt_label = (BASIS_SUM if avg_mode else BASIS_AVG) if n_months > 1 else ""
 prev_values = aggregate_values(prev_reps) if prev_reps else {}
-menu_now = breakdown_for(month_reps)
-menu_prev = breakdown_for(prev_reps)
+
+# メニュー別：期間を指定しても合算せず、期間の中で最も新しい「メニューのデータがある月」を表示する
+menu_month = next((m for m in reversed(sel_months) if any(not r["breakdown"].empty for r in reports_for(m))), sel_months[-1])
+menu_now = breakdown_for(reports_for(menu_month))
+menu_prev = breakdown_for(reports_for(menu_month - 1))
+if menu_month == last_month:
+    menu_ratio = last_ratio
+else:
+    menu_ratio = 1.0
 
 # ---------------------------------------------------------------------------
 # 施術分類の階層化（親メニュー → 内訳）
@@ -1481,7 +1564,7 @@ def build_kpi_table() -> pd.DataFrame:
         value, found, where = values[spec["name"]]
         target = ss.kpi_targets.get(spec["name"])
         if target and spec["agg"] == SUM:
-            target = target * n_months  # 期間合算：月間目標 × 月数
+            target = target * target_scale  # 期間の合算：月間目標 × 月数（月平均は月間目標のまま）
         res = judge(value, target, found, spec["agg"], ratio, spec.get("lower_better", False))
         rows.append(
             {
@@ -1498,6 +1581,9 @@ def build_kpi_table() -> pd.DataFrame:
                 "着地見込み": res["forecast"],
                 "判定": res["status"],
                 "取得元": where,
+                # 期間を指定したとき、合計の項目はもう一方の見方（合算⇔月平均）も表示する
+                "別表示": (f"{alt_label} {fmt(alt_values[spec['name']][0], spec['unit'])}"
+                         if alt_values and found and spec.get("combine", spec["agg"]) == SUM else ""),
             }
         )
     table = pd.DataFrame(rows)
@@ -1508,7 +1594,8 @@ def build_kpi_table() -> pd.DataFrame:
 
 period_text = (
     f"{period_start:%Y/%m/%d}〜{period_end:%m/%d}（{covered_days}/{dim}日・{ratio:.0%}経過）" if n_months == 1
-    else f"{sel_months[0].year}年{sel_months[0].month}月〜{sel_months[-1].year}年{sel_months[-1].month}月（{n_months}ヶ月を合算・目標も{n_months}ヶ月分）"
+    else f"{sel_months[0].year}年{sel_months[0].month}月〜{sel_months[-1].year}年{sel_months[-1].month}月"
+    + (f"（{n_months}ヶ月の月平均・目標は月間目標）" if avg_mode else f"（{n_months}ヶ月の合算・目標も{n_months}ヶ月分）")
 )
 
 
@@ -1572,6 +1659,8 @@ def page_dashboard():
             "月末着地見込み": table.apply(lambda r: fmt(r["着地見込み"], r["単位"]) if r["集計"] == SUM else "—", axis=1),
         }
     )
+    if n_months > 1:  # 期間を指定したときは、もう一方の見方（合算⇔月平均）の列も出す
+        view.insert(3, alt_label, table["別表示"].str.replace(f"{alt_label} ", "", regex=False).replace("", "—").values)
     st.dataframe(
         view,
         hide_index=True,
@@ -1587,69 +1676,8 @@ def page_dashboard():
     if (~kpi["取得"]).any():
         st.caption("⚠️ の項目は報告書の中に見つからなかったため、0 として計算しています。")
 
-    # ---- メニュー・カテゴリ別 ----
-    section("メニュー・カテゴリ別")
-    st.markdown("**窓口売上の内訳**")
-    matrix = [
-        {"患者区分": p, "区分": k, "売上": by_name.at[f"{k}売上（{p}）", "現状"]}
-        for p in ["新患", "再診", "継続"]
-        for k in SALES_COLORS
-        if f"{k}売上（{p}）" in by_name.index
-    ]
-    matrix_df = pd.DataFrame(matrix)
-    if matrix_df.empty or matrix_df["売上"].sum() == 0:
-        st.caption("患者区分別の売上が報告書から取得できませんでした。")
-    else:
-        left, right = st.columns([5, 6], gap="large")
-        left.altair_chart(
-            alt.Chart(matrix_df)
-            .mark_bar()
-            .encode(
-                y=alt.Y("患者区分:N", sort=["新患", "再診", "継続"], title=None),
-                x=alt.X("売上:Q", title=None, stack="zero", axis=alt.Axis(format="~s")),
-                color=alt.Color("区分:N", scale=alt.Scale(domain=list(SALES_COLORS), range=list(SALES_COLORS.values())),
-                                legend=alt.Legend(orient="top", title=None)),
-                tooltip=["患者区分", "区分", alt.Tooltip("売上:Q", format=",.0f")],
-            )
-            .properties(height=alt.Step(30)),
-            width="stretch",
-        )
-        pivot = matrix_df.pivot_table(index="患者区分", columns="区分", values="売上", aggfunc="sum").reindex(
-            index=["新患", "再診", "継続"], columns=list(SALES_COLORS)
-        )
-        pivot["合計"] = pivot.sum(axis=1)
-        pivot.loc["全体"] = pivot.sum()
-        right.dataframe(pivot.style.format("{:,.0f}"), width="stretch")
-
-    st.markdown("**施術分類（メニュー）別の売上**")
-    if menu_now.empty:
-        st.caption("「施術分類」の一覧が報告書から取得できませんでした。")
-    else:
-        tree = menu_tree(scale=n_months)
-        total = sum(g["売上"] for g in tree) or 1.0
-        def is_active(g):
-            return g["売上"] > 0 or g["人数"] > 0 or bool(g["目標"]) or bool(g["件数目標"])
-
-        active = [g for g in tree if is_active(g)]
-        idle = [g for g in tree if not is_active(g)]
-        st.markdown(menu_tree_html(active, ratio, total), unsafe_allow_html=True)
-        st.caption(
-            "親メニューの行は内訳（新規・継続の回数券、体験、声掛けなど）の売上合計で、行をタップすると内訳を開閉できます。"
-            "件数は内訳ごとに目標と進捗を表示しています。パイオネックス・お灸は「鍼」に含めています。"
-            "目標とグループ分けは「目標設定」ページで変更できます。"
-        )
-        if idle:
-            with st.expander(f"今月の実績が無いメニュー（{len(idle)}件）"):
-                st.markdown(menu_tree_html(idle, ratio, total, open_top=0), unsafe_allow_html=True)
-
-        trial_html = trial_cards_html(tree, ratio)
-        if trial_html:
-            st.markdown("**体験メニューの進捗（件数）**")
-            st.markdown(trial_html, unsafe_allow_html=True)
-            st.caption("体験メニューごとに、件数目標に対する進捗率と「あと◯件」を表示しています。バーの縦線は本日時点で到達しているべき位置です。")
-
     # ---- 推移 ----
-    section("月別の推移")
+    section("月次推移", "読み込んだすべての月の推移")
     history = []
     for m in months:
         reps = reports_for(m)
@@ -1698,6 +1726,65 @@ def page_dashboard():
             )
         if sel_months[-1] == months[-1] and last_ratio < 1:
             st.caption(f"※ {sel_months[-1].month}月は月の途中（{last_ratio:.0%}経過）までの実績です。")
+
+    # ---- メニュー・カテゴリ別 ----
+    section("メニュー別", f"{menu_month.year}年{menu_month.month}月のデータ（期間の合算はしません）")
+    matrix = [
+        {"患者区分": p, "区分": k, "売上": by_name.at[f"{k}売上（{p}）", "現状"]}
+        for p in ["新患", "再診", "継続"]
+        for k in SALES_COLORS
+        if f"{k}売上（{p}）" in by_name.index
+    ]
+    matrix_df = pd.DataFrame(matrix)
+    if not (matrix_df.empty or matrix_df["売上"].sum() == 0):  # 患者区分別の売上（月間報告書のデータがあるときだけ）
+        st.markdown("**窓口売上の内訳**")
+        left, right = st.columns([5, 6], gap="large")
+        left.altair_chart(
+            alt.Chart(matrix_df)
+            .mark_bar()
+            .encode(
+                y=alt.Y("患者区分:N", sort=["新患", "再診", "継続"], title=None),
+                x=alt.X("売上:Q", title=None, stack="zero", axis=alt.Axis(format="~s")),
+                color=alt.Color("区分:N", scale=alt.Scale(domain=list(SALES_COLORS), range=list(SALES_COLORS.values())),
+                                legend=alt.Legend(orient="top", title=None)),
+                tooltip=["患者区分", "区分", alt.Tooltip("売上:Q", format=",.0f")],
+            )
+            .properties(height=alt.Step(30)),
+            width="stretch",
+        )
+        pivot = matrix_df.pivot_table(index="患者区分", columns="区分", values="売上", aggfunc="sum").reindex(
+            index=["新患", "再診", "継続"], columns=list(SALES_COLORS)
+        )
+        pivot["合計"] = pivot.sum(axis=1)
+        pivot.loc["全体"] = pivot.sum()
+        right.dataframe(pivot.style.format("{:,.0f}"), width="stretch")
+
+    st.markdown("**施術分類（メニュー）別の売上**")
+    if menu_now.empty:
+        st.caption("メニュー別のデータがありません。サイドバーの「② メニュー別の数値」から商品売上分析のCSVを読み込んでください。")
+    else:
+        tree = menu_tree(scale=1)
+        total = sum(g["売上"] for g in tree) or 1.0
+        def is_active(g):
+            return g["売上"] > 0 or g["人数"] > 0 or bool(g["目標"]) or bool(g["件数目標"])
+
+        active = [g for g in tree if is_active(g)]
+        idle = [g for g in tree if not is_active(g)]
+        st.markdown(menu_tree_html(active, menu_ratio, total), unsafe_allow_html=True)
+        st.caption(
+            "親メニューの行は内訳（新規・継続の回数券、体験、声掛けなど）の売上合計で、行をタップすると内訳を開閉できます。"
+            "件数は内訳ごとに目標と進捗を表示しています。パイオネックス・お灸は「鍼」に含めています。"
+            "目標とグループ分けは「目標設定」ページで変更できます。"
+        )
+        if idle:
+            with st.expander(f"今月の実績が無いメニュー（{len(idle)}件）"):
+                st.markdown(menu_tree_html(idle, menu_ratio, total, open_top=0), unsafe_allow_html=True)
+
+        trial_html = trial_cards_html(tree, menu_ratio)
+        if trial_html:
+            st.markdown("**体験メニューの進捗（件数）**")
+            st.markdown(trial_html, unsafe_allow_html=True)
+            st.caption("体験メニューごとに、件数目標に対する進捗率と「あと◯件」を表示しています。バーの縦線は本日時点で到達しているべき位置です。")
 
     with st.expander(f"読み込んだ報告書（{len(reports)}件）"):
         if skipped:
