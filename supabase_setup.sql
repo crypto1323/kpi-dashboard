@@ -1,7 +1,7 @@
 -- 月間KPIダッシュボード用のテーブル作成
 -- Supabase の「SQL Editor」にこの内容をすべて貼り付けて「Run」を押してください（1回だけでOK）。
 
--- 目標・設定を保存するテーブル（key = 'targets' / 'config'）
+-- 目標・設定・ファイル一覧を保存するテーブル（key = 'ws:<合言葉から作る名前>:targets' など）
 create table if not exists app_store (
   key        text primary key,
   value      jsonb not null default '{}'::jsonb,
@@ -28,3 +28,9 @@ create index if not exists kpi_reports_period_end_idx on kpi_reports (period_end
 -- ダッシュボードはサーバー側で「secret キー（service_role）」を使って接続します。
 alter table app_store   enable row level security;
 alter table kpi_reports enable row level security;
+
+-- アップロードしたファイル（月次推移CSV・メニュー別CSV・月間報告書）を保存する場所（非公開）
+-- ※ダッシュボードが最初の保存時に自動で作りますが、念のためここでも作成します。
+insert into storage.buckets (id, name, public)
+values ('kpi-files', 'kpi-files', false)
+on conflict (id) do nothing;

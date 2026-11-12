@@ -603,20 +603,81 @@ def sample_files(today: date, version: int = 2) -> list[tuple[str, bytes]]:
 
 
 # ---------------------------------------------------------------------------
-# データの保存先：このブラウザのセッション（st.session_state）だけ
-#   アップロードしたデータ・目標・設定は、他の人の画面とは共有しない。
-#   ページを再読み込み（F5）・ログアウトすると消える（目標はファイルに書き出して保存できる）。
+# データの保存先
+#   ・Supabase の接続情報（st.secrets の [supabase]）があれば、Supabase に長期保存する
+#       目標・設定・ファイル一覧 … app_store テーブル（キーは「合言葉ごと」に分ける）
+#       アップロードしたファイル … Storage のバケット（既定 kpi-files、非公開）
+#   ・接続情報が無いとき（ローカルでの確認など）は、このブラウザのセッションだけに保存する
+#   合言葉が同じ人どうしは同じデータを見る。合言葉が違えば互いのデータは見えない。
 # ---------------------------------------------------------------------------
+STORE_TABLE = "app_store"
+DEFAULT_BUCKET = "kpi-files"
+CONTENT_TYPES = {
+    ".csv": "text/csv",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+def supabase_conf() -> dict | None:
+    """st.secrets の [supabase]（url・key・bucket）。無ければ None。"""
+    try:
+        secrets = st.secrets.to_dict()
+    except Exception:  # noqa: BLE001
+        return None
+    sec = {str(k).lower(): v for k, v in secrets.items()}.get("supabase")
+    if not isinstance(sec, dict):
+        return None
+    sec = {str(k).lower(): v for k, v in sec.items()}
+    url = str(sec.get("url") or sec.get("supabase_url") or "").strip()
+    key = str(sec.get("key") or sec.get("supabase_key") or sec.get("service_role_key") or "").strip()
+    if not url or not key:
+        return None
+    return {"url": url, "key": key, "bucket": str(sec.get("bucket") or DEFAULT_BUCKET).strip()}
+
+
+@st.cache_resource(show_spinner=False)
+def supabase_client(url: str, key: str):
+    from supabase import create_client
+
+    return create_client(url, key)
+
+
+def db():
+    conf = supabase_conf()
+    return supabase_client(conf["url"], conf["key"]) if conf else None
+
+
+def workspace_id() -> str:
+    """合言葉から作る、保存用の名前（合言葉そのものは保存しない）。"""
+    word = unicodedata.normalize("NFKC", st.session_state.get("workspace", "")).strip().lower()
+    return hashlib.sha256(word.encode("utf-8")).hexdigest()[:20]
+
+
+def ws_key(key: str) -> str:
+    return f"ws:{workspace_id()}:{key}"
+
+
 def session_store() -> dict:
-    return st.session_state.setdefault("_store", {"targets": {}, "config": {}})
+    return st.session_state.setdefault("_store", {})
 
 
 def store_get(key: str) -> dict:
-    return dict(session_store().get(key, {}))
+    client = db()
+    if client is None:
+        return dict(session_store().get(key, {}))
+    rows = client.table(STORE_TABLE).select("value").eq("key", ws_key(key)).limit(1).execute().data
+    return dict(rows[0]["value"] or {}) if rows else {}
 
 
 def store_put(key: str, value: dict) -> None:
-    session_store()[key] = dict(value)
+    client = db()
+    if client is None:
+        session_store()[key] = dict(value)
+        return
+    client.table(STORE_TABLE).upsert(
+        {"key": ws_key(key), "value": value, "updated_at": pd.Timestamp.now(tz="UTC").isoformat()}
+    ).execute()
 
 
 def update_store(key: str, changes: dict) -> None:
@@ -629,6 +690,46 @@ def save_section(key: str, section: str, value: dict) -> None:
     data = store_get(key)
     data[section] = dict(value)
     store_put(key, data)
+
+
+# ---- アップロードしたファイルそのもの（Supabase Storage） ----
+@st.cache_resource(show_spinner=False)
+def ensure_bucket(url: str, bucket: str) -> bool:
+    """バケットが無ければ作る（非公開）。最初の1回だけ実行される。"""
+    client = db()
+    try:
+        client.storage.get_bucket(bucket)
+    except Exception:  # noqa: BLE001  まだ無い
+        client.storage.create_bucket(bucket, options={"public": False})
+    return True
+
+
+def file_bucket():
+    conf = supabase_conf()
+    ensure_bucket(conf["url"], conf["bucket"])
+    return db().storage.from_(conf["bucket"])
+
+
+def save_file(name: str, raw: bytes) -> str | None:
+    """ファイルを保存し、保存先のパスを返す（Supabase 未設定なら保存しない）。"""
+    if db() is None:
+        return None
+    ext = Path(name).suffix.lower()
+    path = f"{workspace_id()}/{hashlib.md5(raw).hexdigest()}{ext}"
+    file_bucket().upload(path, raw, {"content-type": CONTENT_TYPES.get(ext, "application/octet-stream"), "upsert": "true"})
+    return path
+
+
+@st.cache_data(show_spinner=False, max_entries=200)
+def load_file(path: str) -> bytes:
+    """保存したファイルを取り出す（パスは中身ごとに違うので、一度取り出せばキャッシュを使う）。"""
+    return file_bucket().download(path)
+
+
+def delete_files(paths: list[str]) -> None:
+    paths = [x for x in paths if x]
+    if db() is not None and paths:
+        file_bucket().remove(paths)
 
 
 # ---------------------------------------------------------------------------
@@ -1091,24 +1192,39 @@ def require_login() -> None:
     _, center, _ = st.columns([1, 1.2, 1])
     with center:
         st.markdown("<div class='page-title'>🔒 月間KPIダッシュボード</div>", unsafe_allow_html=True)
-        st.markdown("<div class='page-meta'>パスワードを入力してログインしてください。</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='page-meta'>パスワードと合言葉を入力してログインしてください。"
+            "同じ合言葉で入った人どうしは、同じ目標・同じファイルを見られます。</div>",
+            unsafe_allow_html=True,
+        )
         password = configured_password()
         if password is None:
             st.error("現在ログインできません。管理者にご連絡ください。")
             st.stop()
         with st.form("login_form", border=True):
             entered = st.text_input("パスワード", type="password", placeholder="パスワード")
+            word = st.text_input(
+                "合言葉（データの保存場所の名前）", placeholder="例：shinjuku-2026",
+                help="次回も同じ合言葉で入ると、保存した目標とファイルがそのまま表示されます。"
+                     "他の人に見られないよう、推測されにくい合言葉にしてください（4文字以上）。",
+            )
             submitted = st.form_submit_button("ログイン", type="primary", width="stretch")
         if submitted:
-            if hmac.compare_digest(entered.encode("utf-8"), password.encode("utf-8")):
+            word = unicodedata.normalize("NFKC", word).strip()
+            if not hmac.compare_digest(entered.encode("utf-8"), password.encode("utf-8")):
+                st.error("パスワードが違います。")
+            elif len(word) < 4:
+                st.error("合言葉を4文字以上で入力してください。")
+            else:
                 st.session_state.authenticated = True
+                st.session_state.workspace = word
                 st.rerun()
-            st.error("パスワードが違います。")
     st.stop()
 
 
 require_login()
 with st.sidebar:
+    st.markdown(f"<small>🔑 合言葉：<b>{html.escape(st.session_state.get('workspace', ''))}</b></small>", unsafe_allow_html=True)
     if st.button("ログアウト", icon="🔓", key="logout"):
         st.session_state.clear()
         st.rerun()
@@ -1117,10 +1233,16 @@ today = date.today()
 ss = st.session_state
 ss.setdefault("target_ver", 0)
 ss.setdefault("upload_ver", 0)
-ss.setdefault("sources", {})  # 読み込んだファイル（このブラウザだけ）：id → 内容
+ss.setdefault("sources", {})  # 読み込んだファイル：id → 内容
+PERSISTENT = supabase_conf() is not None  # Supabase に長期保存できるか
 
-shared_targets = store_get("targets")
-config = store_get("config")
+try:
+    shared_targets = store_get("targets")
+    config = store_get("config")
+    file_index = store_get("files")  # 保存したファイルの一覧（名前・種類・対象月・保存先）
+except Exception:  # noqa: BLE001  Supabase に接続できない（一時停止中など）
+    st.error("データの保存先に接続できません。しばらくしてからページを再読み込みしてください。解決しない場合は管理者にご連絡ください。")
+    st.stop()
 ss.kpi_targets = dict(shared_targets.get("kpi", DEFAULT_TARGETS))     # 一度も保存していなければ初期値
 ss.menu_targets = dict(shared_targets.get("menu_sales", {}))           # メニュー別 売上目標
 ss.menu_count_targets = dict(shared_targets.get("menu_count", {}))     # メニュー別 件数目標
@@ -1137,11 +1259,8 @@ custom = tuple(
 )
 
 
-def add_source(kind: str, name: str, raw: bytes) -> str:
-    """アップロードされたファイルを読み、このブラウザのデータに追加する。結果を文字で返す。"""
-    sid = f"{name}:{hashlib.md5(raw).hexdigest()[:10]}"
-    if sid in ss.sources:
-        return f"「{name}」は読み込み済みです"
+def parse_source(kind: str, name: str, raw: bytes) -> dict:
+    """ファイルを読んで中身を返す（保存はしない）。kind は "total"（全体の数値）か "menu"。"""
     ext = Path(name).suffix.lower()
     if kind == "menu":
         if ext != ".csv":
@@ -1150,15 +1269,56 @@ def add_source(kind: str, name: str, raw: bytes) -> str:
         if parsed is None:
             raise ValueError("「商品名」と「販売数」または「売上金額」の列が見つかりませんでした。")
         month = pd.Period(parsed["period"]["end"], "M") if parsed["period"] else None
-        ss.sources[sid] = {"kind": "menu", "name": name, "data": parsed, "month": month, "month_detected": month is not None}
-        return f"「{name}」：メニュー {len(parsed['breakdown'])}件"
+        return {"kind": "menu", "name": name, "data": parsed, "month": month, "month_detected": month is not None,
+                "summary": f"メニュー {len(parsed['breakdown'])}件"}
     if ext == ".csv" and (parsed := parse_monthly_csv(raw, name)) is not None:
-        ss.sources[sid] = {"kind": "monthly", "name": name, "data": parsed}
-        return f"「{name}」：{parsed['year']}年の月次推移"
+        return {"kind": "monthly", "name": name, "data": parsed, "summary": f"{parsed['year']}年の月次推移"}
     ext_data = extract_file(raw, name, custom, CATALOG_SIG)  # 月間報告書（Excel）
     month = pd.Period(ext_data["period"]["end"], "M") if ext_data["period"] else None
-    ss.sources[sid] = {"kind": "report", "name": name, "data": ext_data, "month": month, "month_detected": month is not None}
-    return f"「{name}」：{ext_data['clinic']} の月間報告書"
+    return {"kind": "report", "name": name, "data": ext_data, "month": month, "month_detected": month is not None,
+            "summary": f"{ext_data['clinic']} の月間報告書"}
+
+
+def save_file_index() -> None:
+    """読み込んだファイルの一覧（名前・種類・対象月・保存先）を保存する。"""
+    store_put("files", {"items": [
+        {"sid": sid, "area": src["area"], "name": src["name"], "path": src.get("path"),
+         "month": str(src["month"]) if src.get("month") is not None else None, "month_detected": src.get("month_detected", True)}
+        for sid, src in ss.sources.items()
+    ]})
+
+
+def add_source(area: str, name: str, raw: bytes) -> str:
+    """アップロードされたファイルを読み、保存して一覧に追加する。結果を文字で返す。"""
+    sid = f"{name}:{hashlib.md5(raw).hexdigest()[:10]}"
+    if sid in ss.sources:
+        return f"「{name}」は読み込み済みです"
+    src = parse_source(area, name, raw)
+    src.update({"area": area, "raw": raw, "path": save_file(name, raw)})
+    ss.sources[sid] = src
+    save_file_index()
+    return f"「{name}」：{src['summary']}" + ("（保存しました）" if src["path"] else "")
+
+
+# 保存してあるファイルを、ログイン後に1回だけ読み込む（合言葉ごと）
+if ss.get("sources_ws") != st.session_state.get("workspace"):
+    ss.sources, load_errors = {}, []
+    if PERSISTENT:
+        with st.spinner("保存してあるファイルを読み込んでいます…"):
+            for item in file_index.get("items", []):
+                try:
+                    raw = load_file(item["path"])
+                    src = parse_source(item["area"], item["name"], raw)
+                except Exception as e:  # noqa: BLE001
+                    load_errors.append(f"「{item['name']}」を読み込めませんでした（{type(e).__name__}）")
+                    continue
+                if item.get("month") and src["kind"] in ("menu", "report"):
+                    src["month"] = pd.Period(item["month"], "M")
+                    src["month_detected"] = item.get("month_detected", True)
+                src.update({"area": item["area"], "raw": raw, "path": item["path"]})
+                ss.sources[item["sid"]] = src
+    ss.sources_ws = st.session_state.get("workspace")
+    ss.load_errors = load_errors
 
 
 KIND_LABEL = {"monthly": "📈 月次推移CSV", "report": "📄 月間報告書", "menu": "🍽️ メニュー別CSV"}
@@ -1183,15 +1343,23 @@ def month_choice(sid: str, src: dict) -> None:
     current = src["month"] or choices[0]
     if current not in choices:
         choices.append(current)
-    src["month"] = st.selectbox(
+    picked = st.selectbox(
         "対象月" + ("" if src["month_detected"] else "（ファイルから読み取れないため選択）"),
         choices, index=choices.index(current), format_func=lambda m: f"{m.year}年{m.month:02d}月", key=f"month_{sid}",
     )
+    if picked != src["month"]:
+        src["month"] = picked
+        save_file_index()  # 選んだ対象月も保存する
 
 
 with st.sidebar:
     st.markdown("**📂 データの読み込み**")
-    st.caption("読み込んだデータと目標は、この画面だけで使われます（他の人には見えません）。再読み込みすると消えます。")
+    if PERSISTENT:
+        st.caption("読み込んだファイルと目標は合言葉ごとに保存され、次回も同じ合言葉で入ると表示されます。")
+    else:
+        st.caption("読み込んだデータと目標は、この画面だけで使われます。再読み込みすると消えます。")
+    for msg in ss.pop("load_errors", []):
+        st.warning(msg)
     for area in UPLOAD_AREAS:
         with st.container(border=True):
             st.markdown(f"**{area['title']}**")
@@ -1207,6 +1375,8 @@ with st.sidebar:
                             msgs.append(add_source(area["kind"], u.name, u.getvalue()))
                         except ValueError as e:
                             errors.append(f"「{u.name}」：{e}")
+                        except Exception as e:  # noqa: BLE001  保存先に接続できないなど
+                            errors.append(f"「{u.name}」を保存できませんでした（{type(e).__name__}）。時間をおいて再度お試しください。")
                 ss[f"notice_{area['kind']}"], ss[f"errors_{area['kind']}"] = msgs, errors
                 ss.upload_ver += 1  # アップロード欄を空に戻す
                 st.rerun()
@@ -1220,17 +1390,25 @@ with st.sidebar:
             if loaded:
                 st.markdown(f"<small><b>✅ 読み込み済み（{len(loaded)}件）</b></small>", unsafe_allow_html=True)
                 for sid, src in loaded:
-                    c1, c2 = st.columns([5, 1], vertical_alignment="center")
+                    c1, c2, c3 = st.columns([4, 1, 1], vertical_alignment="center")
                     c1.markdown(f"<small>{KIND_LABEL[src['kind']]}<br>{html.escape(src['name'])}</small>", unsafe_allow_html=True)
-                    if c2.button("", icon=":material/close:", key=f"del_{sid}", help="このファイルを削除", type="tertiary"):
-                        del ss.sources[sid]
+                    c2.download_button("", src["raw"], file_name=src["name"], icon=":material/download:", key=f"dl_{sid}",
+                                       help="このファイルをダウンロード", type="tertiary",
+                                       mime=CONTENT_TYPES.get(Path(src["name"]).suffix.lower(), "application/octet-stream"))
+                    if c3.button("", icon=":material/close:", key=f"del_{sid}", help="このファイルを削除", type="tertiary"):
+                        removed = ss.sources.pop(sid)
+                        if removed.get("path") and not any(x.get("path") == removed["path"] for x in ss.sources.values()):
+                            delete_files([removed["path"]])
+                        save_file_index()
                         st.rerun()
                     if src["kind"] in ("menu", "report"):
                         month_choice(sid, src)
                 if st.button("この欄をリセット", icon=":material/delete_sweep:", key=f"reset_{area['kind']}", width="stretch",
                              help="この欄で読み込んだデータをすべて削除します"):
-                    for sid, _ in loaded:
-                        ss.sources.pop(sid, None)
+                    removed = [ss.sources.pop(sid) for sid, _ in loaded]
+                    delete_files([r.get("path") for r in removed
+                                  if not any(x.get("path") == r.get("path") for x in ss.sources.values())])
+                    save_file_index()
                     ss.upload_ver += 1
                     st.rerun()
             else:
@@ -1813,8 +1991,9 @@ def page_dashboard():
 def page_targets():
     st.markdown("<div class='page-title'>🎯 目標設定</div>", unsafe_allow_html=True)
     st.markdown(
-        "<div class='page-meta'>ここで保存した<b>月間</b>目標は、この画面のダッシュボード（カード・一覧・メニュー別・推移）で使われます"
-        "（他の人とは共有されません）。期間を合算して表示するときは、合計の項目の目標が月数ぶんになります。"
+        "<div class='page-meta'>ここで保存した<b>月間</b>目標は、ダッシュボード（カード・一覧・メニュー別・推移）で使われ、"
+        + ("合言葉ごとに長期保存されます（同じ合言葉の人と共有）。" if PERSISTENT else "この画面だけで使われます。")
+        + "期間を合算して表示するときは、合計の項目の目標が月数ぶんになります。"
         f"参考として {month_label}（{sel_clinic}）の実績を表示しています。</div>",
         unsafe_allow_html=True,
     )
@@ -1985,7 +2164,7 @@ def page_targets():
             st.rerun()
 
     with st.expander("💾 目標の書き出し・読み込み・リセット"):
-        st.caption("目標はこの画面にだけ保存され、再読み込みすると初期値に戻ります。ファイルに書き出しておけば、次回読み込んで続きから使えます。")
+        st.caption("目標をファイルに書き出してバックアップしたり、別の合言葉へ移したりできます。")
         backup = json.dumps({"targets": store_get("targets") or {"kpi": ss.kpi_targets, "menu_sales": ss.menu_targets,
                                                                  "menu_count": ss.menu_count_targets},
                              "config": store_get("config")}, ensure_ascii=False, indent=2)
