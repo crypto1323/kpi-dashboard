@@ -20,6 +20,8 @@ export function InlineTextField({
   type = "text",
   min,
   step,
+  placeholder,
+  list,
 }: {
   action: (formData: FormData) => void;
   name: string;
@@ -29,6 +31,9 @@ export function InlineTextField({
   type?: "text" | "date" | "number";
   min?: number;
   step?: number;
+  placeholder?: string;
+  /** id of a <datalist> offering suggestions while still allowing free text. */
+  list?: string;
 }) {
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -44,6 +49,8 @@ export function InlineTextField({
         className={className}
         min={min}
         step={step}
+        placeholder={placeholder}
+        list={list}
         onBlur={() => formRef.current?.requestSubmit()}
         onKeyDown={(event) => {
           if (event.key === "Enter") {

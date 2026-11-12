@@ -21,22 +21,10 @@ export default function LoginPage() {
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>初診患者KPIダッシュボード</CardTitle>
-          <CardDescription>
-            登録済みのメールアドレスでログインしてください。
-          </CardDescription>
+          <CardDescription>共有パスワードを入力してください。</CardDescription>
         </CardHeader>
         <CardContent>
           <form action={formAction} className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="email">メールアドレス</Label>
-              <Input
-                id="email"
-                name="email"
-                type="email"
-                autoComplete="email"
-                required
-              />
-            </div>
             <div className="flex flex-col gap-2">
               <Label htmlFor="password">パスワード</Label>
               <Input
@@ -44,6 +32,7 @@ export default function LoginPage() {
                 name="password"
                 type="password"
                 autoComplete="current-password"
+                autoFocus
                 required
               />
             </div>

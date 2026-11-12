@@ -12,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { adminGateOrNull } from "@/lib/admin-gate";
 import { updateStore } from "../actions";
 
 export default async function EditStorePage({
@@ -21,13 +22,16 @@ export default async function EditStorePage({
   const { id } = await params;
   const { error } = await searchParams;
 
+  const gate = await adminGateOrNull(`/dashboard/master/stores/${id}`);
+  if (gate) return gate;
+
   const supabase = await createClient();
   const [{ data: store }, { data: areas }] = await Promise.all([
     supabase.from("stores").select("*").eq("id", id).single(),
-    supabase.from("areas").select("id, name").order("name"),
+    supabase.from("areas").select("id, name").eq("is_deleted", false).order("name"),
   ]);
 
-  if (!store) notFound();
+  if (!store || store.is_deleted) notFound();
 
   const updateStoreWithId = updateStore.bind(null, id);
 
@@ -72,6 +76,18 @@ export default async function EditStorePage({
                 type="date"
                 defaultValue={store.opened_at ?? ""}
               />
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="accessPassword">店舗シート閲覧用パスワード（任意）</Label>
+              <Input
+                id="accessPassword"
+                name="accessPassword"
+                defaultValue={store.access_password ?? ""}
+                placeholder="未設定（誰でも閲覧可）"
+              />
+              <p className="text-xs text-muted-foreground">
+                設定すると、この店舗の店舗シートを開く前にパスワード入力が必要になります。空欄で保存するとロックを解除します。
+              </p>
             </div>
             {error && (
               <p className="text-sm text-destructive">

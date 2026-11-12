@@ -1,9 +1,12 @@
 "use server";
 
+import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getCurrentProfile } from "@/lib/dal";
+import { ensureBackingSession } from "@/lib/backing-session";
+import { storeUnlockCookieName, storeUnlockToken } from "@/lib/store-lock";
 import type { ContractStatus, PatientGender } from "@/lib/types";
 
 const CONTRACT_STATUSES: ContractStatus[] = ["pending", "contracted", "declined"];
@@ -12,6 +15,37 @@ const GENDERS: PatientGender[] = ["male", "female", "other"];
 function monthQueryFrom(formData: FormData) {
   const month = String(formData.get("month") ?? "");
   return month ? `&month=${month}` : "";
+}
+
+/** Checks the entered password against this store's access_password and, on
+ * a match, sets a session cookie so reloads don't re-prompt. Works with no
+ * prior login — establishes the app's backing session itself if needed. */
+export async function unlockStore(formData: FormData) {
+  const storeId = String(formData.get("storeId") ?? "");
+  const password = String(formData.get("password") ?? "");
+  const monthQuery = monthQueryFrom(formData);
+  const redirectBase = `/dashboard/patients?storeId=${storeId}${monthQuery}`;
+
+  const supabase = await ensureBackingSession();
+  const { data: store } = await supabase
+    .from("stores")
+    .select("access_password")
+    .eq("id", storeId)
+    .single();
+
+  if (!store?.access_password || password !== store.access_password) {
+    redirect(`${redirectBase}&lockError=${encodeURIComponent("パスワードが正しくありません。")}`);
+  }
+
+  const cookieStore = await cookies();
+  cookieStore.set(storeUnlockCookieName(storeId), storeUnlockToken(storeId, password), {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+  });
+
+  redirect(redirectBase);
 }
 
 /** Shared tail for every inline-edit action: save one column, then bounce back
@@ -37,17 +71,13 @@ async function saveField(
 
 export async function createPatient(formData: FormData) {
   const profile = await getCurrentProfile();
-  if (profile.role === "area_manager") {
-    redirect("/dashboard/patients");
-  }
 
-  const storeId =
-    profile.role === "admin"
-      ? String(formData.get("storeId") ?? "")
-      : profile.store_id;
+  const storeId = String(formData.get("storeId") ?? "");
   const channelId = String(formData.get("channelId") ?? "");
   const patientName = String(formData.get("patientName") ?? "").trim();
   const assigneeName = String(formData.get("assigneeName") ?? "").trim();
+  // 任意。空のままなら集計上は担当者が成約者として扱われる。
+  const closerName = String(formData.get("closerName") ?? "").trim();
   const genderRaw = String(formData.get("gender") ?? "");
   const gender = GENDERS.includes(genderRaw as PatientGender)
     ? (genderRaw as PatientGender)
@@ -67,6 +97,7 @@ export async function createPatient(formData: FormData) {
     channel_id: channelId,
     patient_name: patientName,
     assignee_name: assigneeName,
+    closer_name: closerName,
     gender,
     visit_date: visitDate,
     created_by: profile.id,
@@ -154,6 +185,16 @@ export async function updatePatientAssignee(id: string, formData: FormData) {
   await saveField(id, storeId, monthQuery, { assignee_name: assigneeName });
 }
 
+/** Inline-editable cell: 成約者. Blank is allowed — it means 担当者と同じ. */
+export async function updatePatientCloser(id: string, formData: FormData) {
+  await getCurrentProfile();
+  const storeId = String(formData.get("storeId") ?? "");
+  const monthQuery = monthQueryFrom(formData);
+  const closerName = String(formData.get("closerName") ?? "").trim();
+
+  await saveField(id, storeId, monthQuery, { closer_name: closerName });
+}
+
 /** Inline-editable cell: 性別. */
 export async function updatePatientGender(id: string, formData: FormData) {
   await getCurrentProfile();
@@ -168,6 +209,22 @@ export async function updatePatientGender(id: string, formData: FormData) {
   }
 
   await saveField(id, storeId, monthQuery, { gender: genderRaw });
+}
+
+/** Inline-editable cell: 流入媒体. */
+export async function updatePatientChannel(id: string, formData: FormData) {
+  await getCurrentProfile();
+  const storeId = String(formData.get("storeId") ?? "");
+  const monthQuery = monthQueryFrom(formData);
+  const channelId = String(formData.get("channelId") ?? "");
+
+  if (!channelId) {
+    redirect(
+      `/dashboard/patients?error=${encodeURIComponent("流入媒体を選択してください。")}&storeId=${storeId}${monthQuery}`,
+    );
+  }
+
+  await saveField(id, storeId, monthQuery, { channel_id: channelId });
 }
 
 /** Inline-editable cell: 初診日. Editing it to a different month moves the row

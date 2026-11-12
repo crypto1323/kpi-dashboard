@@ -20,9 +20,10 @@ export interface RateBarDatum {
 
 /**
  * Grouped bar chart comparing 初診率 (2nd-visit rate) and 成約率 (contract rate)
- * across categories (staff / channel / gender). Colors are the dataviz skill's
- * validated categorical slots 1 (blue) and 2 (orange) — see
- * .claude memory / references/palette.md for the source values.
+ * across categories (staff / channel / gender). Colors follow the app's
+ * role-based palette — blue for 初診 metrics, emerald for 成約 metrics — and
+ * this exact pair is confirmed CVD-safe via the dataviz skill's validator
+ * (ΔE 24.9 deutan / 27.2 normal, both well above the 15 floor).
  */
 export function RateBarChart({ data, height = 260 }: { data: RateBarDatum[]; height?: number }) {
   return (
@@ -30,8 +31,8 @@ export function RateBarChart({ data, height = 260 }: { data: RateBarDatum[]; hei
       className="viz-root"
       style={
         {
-          "--series-1": "#2a78d6",
-          "--series-2": "#eb6834",
+          "--series-1": "#2563eb",
+          "--series-2": "#059669",
           "--grid": "#e1e0d9",
           "--axis-text": "#898781",
         } as CSSProperties

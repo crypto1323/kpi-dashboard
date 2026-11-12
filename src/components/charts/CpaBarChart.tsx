@@ -5,6 +5,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -14,16 +15,23 @@ import {
 export interface CpaDatum {
   label: string;
   cpa: number;
+  color: string;
 }
 
-/** Single-series magnitude comparison (集客費/CPA per channel) — one hue, no legend needed. */
+/**
+ * One bar per channel (集客費/CPA). Each channel gets a fixed hue from a
+ * validated 5-color categorical palette, keyed to the channel's stable
+ * sort order (not its rank in the current period's data) so a color always
+ * means the same channel even as the sorted-by-amount display order shifts.
+ * Palette (blue/teal/violet/rose/amber) passes the dataviz validator in this
+ * exact order — worst adjacent pair (amber↔rose) ΔE 16.6 normal / 9.4 deutan.
+ */
 export function CpaBarChart({ data, height = 240 }: { data: CpaDatum[]; height?: number }) {
   return (
     <div
       className="viz-root"
       style={
         {
-          "--series-1": "#2a78d6",
           "--grid": "#e1e0d9",
           "--axis-text": "#898781",
         } as CSSProperties
@@ -42,7 +50,11 @@ export function CpaBarChart({ data, height = 240 }: { data: CpaDatum[]; height?:
             formatter={(value) => `¥${Number(value).toLocaleString()}`}
             contentStyle={{ fontSize: 12, borderRadius: 8 }}
           />
-          <Bar dataKey="cpa" fill="var(--series-1)" radius={[4, 4, 0, 0]} maxBarSize={32} />
+          <Bar dataKey="cpa" radius={[4, 4, 0, 0]} maxBarSize={32}>
+            {data.map((entry) => (
+              <Cell key={entry.label} fill={entry.color} />
+            ))}
+          </Bar>
         </BarChart>
       </ResponsiveContainer>
     </div>

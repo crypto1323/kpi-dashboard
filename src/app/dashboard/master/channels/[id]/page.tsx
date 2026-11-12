@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
+import { adminGateOrNull } from "@/lib/admin-gate";
 import { updateChannel } from "../actions";
 
 export default async function EditChannelPage({
@@ -14,6 +15,9 @@ export default async function EditChannelPage({
   const { id } = await params;
   const { error } = await searchParams;
 
+  const gate = await adminGateOrNull(`/dashboard/master/channels/${id}`);
+  if (gate) return gate;
+
   const supabase = await createClient();
   const { data: channel } = await supabase
     .from("channels")
@@ -21,7 +25,7 @@ export default async function EditChannelPage({
     .eq("id", id)
     .single();
 
-  if (!channel) notFound();
+  if (!channel || channel.is_deleted) notFound();
 
   const updateChannelWithId = updateChannel.bind(null, id);
 

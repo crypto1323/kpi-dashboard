@@ -15,6 +15,7 @@ export interface Area {
   id: string;
   name: string;
   is_active: boolean;
+  is_deleted: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -26,6 +27,8 @@ export interface Store {
   name: string;
   opened_at: string | null;
   is_active: boolean;
+  is_deleted: boolean;
+  access_password: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -36,6 +39,7 @@ export interface Channel {
   category: string | null;
   sort_order: number;
   is_active: boolean;
+  is_deleted: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -61,6 +65,8 @@ export interface Patient {
   contract_status: ContractStatus;
   contracted_date: string | null;
   assignee_name: string;
+  /** 成約者（クロージング担当）。空文字は「担当者と同じ」。 */
+  closer_name: string;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -89,13 +95,17 @@ export interface ChannelPerformanceRow {
   spend_amount: number;
 }
 
-/** Row shape from patient_performance_by_staff — per-staff (assignee_name) totals within one store. */
+/** Row shape from patient_performance_by_staff — per-staff totals within one store.
+ * patient_count / second_visit_count count the staff as 担当者 (assignee_name);
+ * closing_count / contracted_count count them as 成約者 (closer_name, falling
+ * back to assignee_name when blank). 成約率 = contracted_count / closing_count. */
 export interface StaffPerformanceRow {
   store_id: string;
   staff_name: string;
   month: string;
   patient_count: number;
   second_visit_count: number;
+  closing_count: number;
   contracted_count: number;
 }
 
@@ -108,6 +118,7 @@ export interface StaffChannelPerformanceRow {
   month: string;
   patient_count: number;
   second_visit_count: number;
+  closing_count: number;
   contracted_count: number;
 }
 
@@ -119,6 +130,7 @@ export interface StaffGenderPerformanceRow {
   month: string;
   patient_count: number;
   second_visit_count: number;
+  closing_count: number;
   contracted_count: number;
 }
 
@@ -139,6 +151,7 @@ export interface StaffRollupRow {
   month: string;
   patient_count: number;
   second_visit_count: number;
+  closing_count: number;
   contracted_count: number;
 }
 

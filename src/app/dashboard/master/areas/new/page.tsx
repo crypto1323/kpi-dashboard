@@ -3,11 +3,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
+import { adminGateOrNull } from "@/lib/admin-gate";
 import { createArea } from "../actions";
 
 export default async function NewAreaPage({
   searchParams,
 }: PageProps<"/dashboard/master/areas/new">) {
+  const gate = await adminGateOrNull("/dashboard/master/areas/new");
+  if (gate) return gate;
+
   const { error } = await searchParams;
 
   return (

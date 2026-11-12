@@ -1,6 +1,7 @@
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
-import { getCurrentProfile } from "@/lib/dal";
+import { cookies } from "next/headers";
+import { ensureBackingSession } from "@/lib/backing-session";
+import { storeUnlockCookieName, storeUnlockToken } from "@/lib/store-lock";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -36,7 +37,10 @@ import {
   deletePatient,
   toggleContractStatus,
   toggleSecondVisit,
+  unlockStore,
   updatePatientAssignee,
+  updatePatientChannel,
+  updatePatientCloser,
   updatePatientGender,
   updatePatientName,
   updatePatientVisitDate,
@@ -70,7 +74,14 @@ type MetricRow = {
   patient_count: number;
   second_visit_count: number;
   contracted_count: number;
+  /** 担当者別ビューのみ: 成約者として担当した数。成約率の分母。 */
+  closing_count?: number;
 };
+
+/** 成約率の分母。担当者別は「成約者として担当した数」、それ以外は集客数。 */
+function closingBase(row: MetricRow) {
+  return row.closing_count ?? row.patient_count;
+}
 
 function AnalysisTable<T extends MetricRow>({
   rows,
@@ -88,12 +99,15 @@ function AnalysisTable<T extends MetricRow>({
       patient_count: acc.patient_count + row.patient_count,
       second_visit_count: acc.second_visit_count + row.second_visit_count,
       contracted_count: acc.contracted_count + row.contracted_count,
+      closing_count: acc.closing_count + closingBase(row),
     }),
-    { patient_count: 0, second_visit_count: 0, contracted_count: 0 },
+    { patient_count: 0, second_visit_count: 0, contracted_count: 0, closing_count: 0 },
   );
+  const showClosingCount = rows.some((row) => row.closing_count !== undefined);
+  const metricColumnCount = showClosingCount ? 4 : 3;
 
   return (
-    <div className="rounded-lg border bg-background">
+    <div className="rounded-xl border bg-card shadow-md">
       <Table>
         <TableHeader>
           <TableRow>
@@ -102,6 +116,7 @@ function AnalysisTable<T extends MetricRow>({
             ))}
             <TableHead className="text-right">集客数（初診数）</TableHead>
             <TableHead className="text-right">初診率</TableHead>
+            {showClosingCount && <TableHead className="text-right">成約対応数</TableHead>}
             <TableHead className="text-right">成約率</TableHead>
           </TableRow>
         </TableHeader>
@@ -122,15 +137,18 @@ function AnalysisTable<T extends MetricRow>({
               <TableCell className="text-right tabular-nums">
                 {formatPercent(row.second_visit_count, row.patient_count)}
               </TableCell>
+              {showClosingCount && (
+                <TableCell className="text-right tabular-nums">{closingBase(row)}</TableCell>
+              )}
               <TableCell className="text-right tabular-nums">
-                {formatPercent(row.contracted_count, row.patient_count)}
+                {formatPercent(row.contracted_count, closingBase(row))}
               </TableCell>
             </TableRow>
           ))}
           {!rows.length && (
             <TableRow>
               <TableCell
-                colSpan={labelHeaders.length + 3}
+                colSpan={labelHeaders.length + metricColumnCount}
                 className="text-center text-muted-foreground"
               >
                 {emptyMessage}
@@ -150,8 +168,13 @@ function AnalysisTable<T extends MetricRow>({
               <TableCell className="text-right tabular-nums font-medium">
                 {formatPercent(total.second_visit_count, total.patient_count)}
               </TableCell>
+              {showClosingCount && (
+                <TableCell className="text-right tabular-nums font-medium">
+                  {total.closing_count}
+                </TableCell>
+              )}
               <TableCell className="text-right tabular-nums font-medium">
-                {formatPercent(total.contracted_count, total.patient_count)}
+                {formatPercent(total.contracted_count, total.closing_count)}
               </TableCell>
             </TableRow>
           </TableFooter>
@@ -164,54 +187,86 @@ function AnalysisTable<T extends MetricRow>({
 export default async function PatientsPage({
   searchParams,
 }: PageProps<"/dashboard/patients">) {
-  const profile = await getCurrentProfile();
-  const { error, storeId: storeIdParam, month: monthParam } = await searchParams;
+  const {
+    error,
+    storeId: storeIdParam,
+    month: monthParam,
+    lockError,
+  } = await searchParams;
   const month = resolveMonthParam(monthParam);
   const monthStart = monthStartDate(month);
   const monthEnd = nextMonthStart(month);
+  const oneYearBeforeMonthStart = `${Number(month.slice(0, 4)) - 1}${monthStart.slice(4)}`;
 
-  if (profile.role === "area_manager") {
-    return (
-      <Card className="max-w-md">
-        <CardContent className="text-sm text-muted-foreground">
-          エリア長アカウントでは店舗シートは使用できません。集計結果は
-          <Link href="/dashboard/report" className="underline">
-            エリア・全社シート
-          </Link>
-          でご確認いただけます。
-        </CardContent>
-      </Card>
-    );
-  }
+  const supabase = await ensureBackingSession();
 
-  const supabase = await createClient();
-
-  let storeId: string | null = null;
-  let activeStores: { id: string; code: string; name: string }[] = [];
-
-  if (profile.role === "admin") {
-    const { data } = await supabase
-      .from("stores")
-      .select("id, code, name")
-      .eq("is_active", true)
-      .order("code");
-    activeStores = data ?? [];
-    const requested = Array.isArray(storeIdParam) ? storeIdParam[0] : storeIdParam;
-    storeId = requested ?? activeStores[0]?.id ?? null;
-  } else {
-    storeId = profile.store_id;
-  }
+  const { data: storesData } = await supabase
+    .from("stores")
+    .select("id, code, name")
+    .eq("is_active", true)
+    .order("code");
+  const activeStores = storesData ?? [];
+  const requested = Array.isArray(storeIdParam) ? storeIdParam[0] : storeIdParam;
+  const storeId = requested ?? activeStores[0]?.id ?? null;
 
   if (!storeId) {
     return (
       <Card className="max-w-md">
         <CardContent className="text-sm text-muted-foreground">
-          {profile.role === "admin"
-            ? "店舗がまだ登録されていません。先にマスタ管理から店舗を登録してください。"
-            : "店舗が未設定です。管理者にお問い合わせください。"}
+          店舗がまだ登録されていません。先にマスタ管理から店舗を登録してください。
         </CardContent>
       </Card>
     );
+  }
+
+  // --- 要件3: 店舗ごとのアクセスパスワード。設定されていて、かつこのブラウザが
+  //     まだ解錠済みでなければ、患者データを一切取得せずロック画面だけを返す。 ---
+  const { data: lockCheckStore } = await supabase
+    .from("stores")
+    .select("access_password")
+    .eq("id", storeId)
+    .single();
+  const requiredPassword = lockCheckStore?.access_password;
+  if (requiredPassword) {
+    const cookieStore = await cookies();
+    const unlocked =
+      cookieStore.get(storeUnlockCookieName(storeId))?.value ===
+      storeUnlockToken(storeId, requiredPassword);
+    if (!unlocked) {
+      const lockErrorMessage = Array.isArray(lockError) ? lockError[0] : lockError;
+      return (
+        <div className="mx-auto flex max-w-3xl flex-col gap-6 pb-12">
+          <div className="flex items-center justify-between">
+            <h1 className="text-lg font-semibold">店舗シート</h1>
+            <div className="flex items-center gap-3">
+              {activeStores.length > 0 && (
+                <StoreSwitcher stores={activeStores} value={storeId} />
+              )}
+            </div>
+          </div>
+          <Card className="mx-auto w-full max-w-sm">
+            <CardContent>
+              <h2 className="mb-1 text-base font-medium">パスワードが必要です</h2>
+              <p className="mb-4 text-sm text-muted-foreground">
+                この店舗のシートを開くにはパスワードを入力してください。
+              </p>
+              <form action={unlockStore} className="flex flex-col gap-3">
+                <input type="hidden" name="storeId" value={storeId} />
+                <input type="hidden" name="month" value={month} />
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="storePassword">パスワード</Label>
+                  <Input id="storePassword" name="password" type="password" required autoFocus />
+                </div>
+                {lockErrorMessage && (
+                  <p className="text-sm text-destructive">{lockErrorMessage}</p>
+                )}
+                <Button type="submit">開く</Button>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+      );
+    }
   }
 
   const [
@@ -223,6 +278,7 @@ export default async function PatientsPage({
     { data: staffChannelPerf },
     { data: staffGenderPerf },
     { data: genderPerf },
+    { data: recentStaff },
   ] = await Promise.all([
     supabase
       .from("channels")
@@ -262,6 +318,13 @@ export default async function PatientsPage({
       .select("*")
       .eq("store_id", storeId)
       .eq("month", monthStart),
+    // 担当者・成約者の入力候補（この店舗で直近1年に登場した氏名）。
+    supabase
+      .from("patients")
+      .select("assignee_name, closer_name")
+      .eq("store_id", storeId)
+      .gte("visit_date", oneYearBeforeMonthStart)
+      .lt("visit_date", monthEnd),
   ]);
 
   const errorMessage = Array.isArray(error) ? error[0] : error;
@@ -270,8 +333,15 @@ export default async function PatientsPage({
     .filter((row) => row.patient_count > 0)
     .sort((a, b) => b.patient_count - a.patient_count);
   const staffRows = ((staffPerf ?? []) as StaffPerformanceRow[]).sort(
-    (a, b) => b.patient_count - a.patient_count,
+    (a, b) => b.patient_count - a.patient_count || b.closing_count - a.closing_count,
   );
+  const staffNameOptions = Array.from(
+    new Set(
+      (recentStaff ?? [])
+        .flatMap((row) => [row.assignee_name, row.closer_name])
+        .filter((name): name is string => Boolean(name)),
+    ),
+  ).sort((a, b) => a.localeCompare(b, "ja"));
   const staffChannelRows = ((staffChannelPerf ?? []) as StaffChannelPerformanceRow[]).sort(
     (a, b) => a.staff_name.localeCompare(b.staff_name) || b.patient_count - a.patient_count,
   );
@@ -293,7 +363,7 @@ export default async function PatientsPage({
     return rows.map((row) => ({
       label: label(row),
       初診率: Number(rate(row.second_visit_count, row.patient_count).toFixed(1)),
-      成約率: Number(rate(row.contracted_count, row.patient_count).toFixed(1)),
+      成約率: Number(rate(row.contracted_count, closingBase(row)).toFixed(1)),
     }));
   }
   const defaultVisitDate =
@@ -309,7 +379,7 @@ export default async function PatientsPage({
           </p>
         </div>
         <div className="flex items-center gap-3">
-          {profile.role === "admin" && activeStores.length > 0 && (
+          {activeStores.length > 0 && (
             <StoreSwitcher stores={activeStores} value={storeId} />
           )}
           <MonthSwitcher value={month} />
@@ -330,10 +400,13 @@ export default async function PatientsPage({
                 action={createPatient}
                 className="flex flex-wrap items-end gap-3"
               >
-                {profile.role === "admin" && (
-                  <input type="hidden" name="storeId" value={storeId} />
-                )}
+                <input type="hidden" name="storeId" value={storeId} />
                 <input type="hidden" name="month" value={month} />
+                <datalist id="staffNameOptions">
+                  {staffNameOptions.map((name) => (
+                    <option key={name} value={name} />
+                  ))}
+                </datalist>
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="patientName">患者名</Label>
                   <Input
@@ -349,6 +422,17 @@ export default async function PatientsPage({
                     id="assigneeName"
                     name="assigneeName"
                     required
+                    list="staffNameOptions"
+                    className="w-32"
+                  />
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="closerName">成約者</Label>
+                  <Input
+                    id="closerName"
+                    name="closerName"
+                    placeholder="担当者と同じ"
+                    list="staffNameOptions"
                     className="w-32"
                   />
                 </div>
@@ -418,7 +502,7 @@ export default async function PatientsPage({
             </CardContent>
           </Card>
 
-          <div className="rounded-lg border bg-background">
+          <div className="rounded-xl border bg-card shadow-md">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -429,6 +513,7 @@ export default async function PatientsPage({
                   <TableHead>流入媒体</TableHead>
                   <TableHead>2回目来院</TableHead>
                   <TableHead>成約</TableHead>
+                  <TableHead>成約者</TableHead>
                   <TableHead className="text-right">削除</TableHead>
                 </TableRow>
               </TableHeader>
@@ -439,7 +524,9 @@ export default async function PatientsPage({
                   const toggleContractStatusWithId = toggleContractStatus.bind(null, patient.id);
                   const updateNameWithId = updatePatientName.bind(null, patient.id);
                   const updateAssigneeWithId = updatePatientAssignee.bind(null, patient.id);
+                  const updateCloserWithId = updatePatientCloser.bind(null, patient.id);
                   const updateGenderWithId = updatePatientGender.bind(null, patient.id);
+                  const updateChannelWithId = updatePatientChannel.bind(null, patient.id);
                   const updateVisitDateWithId = updatePatientVisitDate.bind(null, patient.id);
                   const hasSecondVisit = Boolean(patient.second_visit_date);
                   const isContracted = patient.contract_status === "contracted";
@@ -481,11 +568,21 @@ export default async function PatientsPage({
                           name="assigneeName"
                           defaultValue={patient.assignee_name}
                           hidden={hiddenFields}
+                          list="staffNameOptions"
                           className="w-28"
                         />
                       </TableCell>
-                      <TableCell className="whitespace-nowrap">
-                        {patient.channels?.name ?? "—"}
+                      <TableCell>
+                        <InlineSelectField
+                          action={updateChannelWithId}
+                          name="channelId"
+                          defaultValue={patient.channel_id}
+                          items={Object.fromEntries(
+                            (channels ?? []).map((channel) => [channel.id, channel.name]),
+                          )}
+                          hidden={hiddenFields}
+                          className="w-32"
+                        />
                       </TableCell>
                       <TableCell>
                         <form action={toggleSecondVisitWithId}>
@@ -525,6 +622,18 @@ export default async function PatientsPage({
                           </button>
                         </form>
                       </TableCell>
+                      <TableCell>
+                        {/* 空欄＝担当者と同じ。プレースホルダーに実効的な成約者を表示する。 */}
+                        <InlineTextField
+                          action={updateCloserWithId}
+                          name="closerName"
+                          defaultValue={patient.closer_name}
+                          placeholder={patient.assignee_name}
+                          hidden={hiddenFields}
+                          list="staffNameOptions"
+                          className="w-28"
+                        />
+                      </TableCell>
                       <TableCell className="text-right">
                         <form action={deletePatientWithId}>
                           <input type="hidden" name="storeId" value={storeId} />
@@ -544,7 +653,7 @@ export default async function PatientsPage({
                 {!patients?.length && (
                   <TableRow>
                     <TableCell
-                      colSpan={8}
+                      colSpan={9}
                       className="text-center text-muted-foreground"
                     >
                       {month}のこの店舗の初診患者はまだ登録されていません。
@@ -582,7 +691,7 @@ export default async function PatientsPage({
 
           <div>
             <h2 className="mb-2 text-sm font-medium text-muted-foreground">
-              担当者別（初診率＝2回目来院した割合）
+              担当者別（初診率＝担当者として対応した患者の2回目来院率／成約率＝成約者として対応した患者の成約率）
             </h2>
             <div className="grid gap-6 lg:grid-cols-2">
               <AnalysisTable
@@ -658,15 +767,13 @@ export default async function PatientsPage({
         </TabsContent>
       </Tabs>
 
-      {profile.role === "admin" && (
-        <p className="text-xs text-muted-foreground">
-          エリア・全社の集計や集客費は
-          <Link href="/dashboard/report" className="underline">
-            エリア・全社シート
-          </Link>
-          で確認できます。
-        </p>
-      )}
+      <p className="text-xs text-muted-foreground">
+        エリア・全社の集計や集客費は
+        <Link href="/dashboard/report" className="underline">
+          エリア・全社シート
+        </Link>
+        で確認できます。
+      </p>
     </div>
   );
 }

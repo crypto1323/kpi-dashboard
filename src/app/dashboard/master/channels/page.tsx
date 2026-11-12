@@ -10,13 +10,19 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { setChannelActive } from "./actions";
+import { ConfirmSubmitButton } from "@/components/confirm-submit-button";
+import { adminGateOrNull } from "@/lib/admin-gate";
+import { deleteChannel, setChannelActive } from "./actions";
 
 export default async function ChannelsPage() {
+  const gate = await adminGateOrNull("/dashboard/master/channels");
+  if (gate) return gate;
+
   const supabase = await createClient();
   const { data: channels } = await supabase
     .from("channels")
     .select("*")
+    .eq("is_deleted", false)
     .order("sort_order");
 
   return (
@@ -27,7 +33,7 @@ export default async function ChannelsPage() {
           + 新規媒体
         </Button>
       </div>
-      <div className="rounded-lg border bg-background">
+      <div className="rounded-xl border bg-card shadow-md">
         <Table>
           <TableHeader>
             <TableRow>
@@ -72,6 +78,16 @@ export default async function ChannelsPage() {
                       <Button type="submit" variant="ghost" size="sm">
                         {channel.is_active ? "無効化" : "有効化"}
                       </Button>
+                    </form>
+                    <form action={deleteChannel}>
+                      <input type="hidden" name="id" value={channel.id} />
+                      <ConfirmSubmitButton
+                        confirmMessage={`「${channel.name}」を削除しますか？過去の患者・集客費データは残りますが、一覧には表示されなくなります。`}
+                        variant="destructive"
+                        size="sm"
+                      >
+                        削除
+                      </ConfirmSubmitButton>
                     </form>
                   </div>
                 </TableCell>

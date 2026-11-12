@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { getCurrentProfile } from "@/lib/dal";
+import { adminGateOrNull } from "@/lib/admin-gate";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Table,
@@ -12,13 +13,22 @@ import {
 } from "@/components/ui/table";
 import { HqScopeSwitcher } from "@/components/hq-scope-switcher";
 import { MonthRangeSwitcher } from "@/components/month-range-switcher";
+import { EditMonthSelect } from "@/components/edit-month-select";
 import { InlineTextField } from "@/components/inline-field";
+import { ConfirmCheckbox } from "@/components/confirm-checkbox";
 import { RateBarChart } from "@/components/charts/RateBarChart";
 import { CpaBarChart } from "@/components/charts/CpaBarChart";
 import { StatTile } from "@/components/charts/StatTile";
 import { Meter } from "@/components/charts/Meter";
-import { upsertChannelSpend } from "./actions";
+import { copyPreviousMonthSpends, upsertChannelSpend } from "./actions";
 import { monthStartDate, prevMonthOf, resolveMonthRangeParams } from "@/lib/month";
+import { aggregateChannelRows } from "@/lib/aggregate";
+import {
+  rate,
+  rateToneClass,
+  SECOND_VISIT_GOOD_THRESHOLD,
+  CONTRACT_GOOD_THRESHOLD,
+} from "@/lib/rate";
 import type {
   ChannelPerformanceRow,
   GenderRollupRow,
@@ -32,14 +42,22 @@ const GENDER_LABEL: Record<PatientGender, string> = {
   other: "その他",
 };
 
+// Fixed, identity-based (not amount-ranked) categorical palette for the CPA
+// bar chart — passes the dataviz validator in this exact order (worst
+// adjacent pair amber↔rose: ΔE 16.6 normal / 9.4 deutan, both above floor).
+const CHANNEL_CHART_PALETTE = ["#2563eb", "#0d9488", "#7c3aed", "#e11d48", "#d97706"];
+
 type MetricRow = {
   patient_count: number;
   second_visit_count: number;
   contracted_count: number;
+  /** 担当者別ビューのみ: 成約者として担当した数。成約率の分母。 */
+  closing_count?: number;
 };
 
-function rate(numerator: number, denominator: number) {
-  return denominator === 0 ? 0 : (numerator / denominator) * 100;
+/** 成約率の分母。担当者別は「成約者として担当した数」、それ以外は集客数。 */
+function closingBase(row: MetricRow) {
+  return row.closing_count ?? row.patient_count;
 }
 
 function formatPercent(numerator: number, denominator: number) {
@@ -48,13 +66,14 @@ function formatPercent(numerator: number, denominator: number) {
 }
 
 function sumTotals(rows: MetricRow[]) {
-  return rows.reduce(
+  return rows.reduce<Required<MetricRow>>(
     (acc, row) => ({
       patient_count: acc.patient_count + row.patient_count,
       second_visit_count: acc.second_visit_count + row.second_visit_count,
       contracted_count: acc.contracted_count + row.contracted_count,
+      closing_count: acc.closing_count + closingBase(row),
     }),
-    { patient_count: 0, second_visit_count: 0, contracted_count: 0 },
+    { patient_count: 0, second_visit_count: 0, contracted_count: 0, closing_count: 0 },
   );
 }
 
@@ -69,7 +88,7 @@ function RollupTable<T extends MetricRow>({
 }) {
   const total = sumTotals(rows);
   return (
-    <div className="rounded-lg border bg-background">
+    <div className="rounded-xl border bg-card shadow-md">
       <Table>
         <TableHeader>
           <TableRow>
@@ -84,11 +103,15 @@ function RollupTable<T extends MetricRow>({
             <TableRow key={index}>
               <TableCell className="font-medium">{getLabel(row)}</TableCell>
               <TableCell className="text-right tabular-nums">{row.patient_count}</TableCell>
-              <TableCell className="text-right tabular-nums">
+              <TableCell
+                className={`text-right tabular-nums font-medium ${rateToneClass(rate(row.second_visit_count, row.patient_count), SECOND_VISIT_GOOD_THRESHOLD, row.patient_count > 0)}`}
+              >
                 {formatPercent(row.second_visit_count, row.patient_count)}
               </TableCell>
-              <TableCell className="text-right tabular-nums">
-                {formatPercent(row.contracted_count, row.patient_count)}
+              <TableCell
+                className={`text-right tabular-nums font-medium ${rateToneClass(rate(row.contracted_count, closingBase(row)), CONTRACT_GOOD_THRESHOLD, closingBase(row) > 0)}`}
+              >
+                {formatPercent(row.contracted_count, closingBase(row))}
               </TableCell>
             </TableRow>
           ))}
@@ -107,11 +130,15 @@ function RollupTable<T extends MetricRow>({
               <TableCell className="text-right tabular-nums font-medium">
                 {total.patient_count}
               </TableCell>
-              <TableCell className="text-right tabular-nums font-medium">
+              <TableCell
+                className={`text-right tabular-nums font-semibold ${rateToneClass(rate(total.second_visit_count, total.patient_count), SECOND_VISIT_GOOD_THRESHOLD, total.patient_count > 0)}`}
+              >
                 {formatPercent(total.second_visit_count, total.patient_count)}
               </TableCell>
-              <TableCell className="text-right tabular-nums font-medium">
-                {formatPercent(total.contracted_count, total.patient_count)}
+              <TableCell
+                className={`text-right tabular-nums font-semibold ${rateToneClass(rate(total.contracted_count, total.closing_count), CONTRACT_GOOD_THRESHOLD, total.closing_count > 0)}`}
+              >
+                {formatPercent(total.contracted_count, total.closing_count)}
               </TableCell>
             </TableRow>
           </TableFooter>
@@ -125,27 +152,8 @@ function toChartData<T extends MetricRow>(rows: T[], label: (row: T) => string) 
   return rows.map((row) => ({
     label: label(row),
     初診率: Number(rate(row.second_visit_count, row.patient_count).toFixed(1)),
-    成約率: Number(rate(row.contracted_count, row.patient_count).toFixed(1)),
+    成約率: Number(rate(row.contracted_count, closingBase(row)).toFixed(1)),
   }));
-}
-
-// The performance views carry one row per month; a period range returns one row
-// per (entity, month) pair, so these collapse that down to one row per entity
-// with every metric — including 集客費 — summed across the selected months.
-function aggregateChannelRows(rows: ChannelPerformanceRow[]): ChannelPerformanceRow[] {
-  const byChannel = new Map<string, ChannelPerformanceRow>();
-  for (const row of rows) {
-    const existing = byChannel.get(row.channel_id);
-    if (existing) {
-      existing.patient_count += row.patient_count;
-      existing.second_visit_count += row.second_visit_count;
-      existing.contracted_count += row.contracted_count;
-      existing.spend_amount += row.spend_amount;
-    } else {
-      byChannel.set(row.channel_id, { ...row });
-    }
-  }
-  return Array.from(byChannel.values());
 }
 
 function aggregateStaffRows(rows: StaffRollupRow[]): StaffRollupRow[] {
@@ -155,6 +163,7 @@ function aggregateStaffRows(rows: StaffRollupRow[]): StaffRollupRow[] {
     if (existing) {
       existing.patient_count += row.patient_count;
       existing.second_visit_count += row.second_visit_count;
+      existing.closing_count += row.closing_count;
       existing.contracted_count += row.contracted_count;
     } else {
       byStaff.set(row.staff_name, { ...row });
@@ -181,18 +190,26 @@ function aggregateGenderRows(rows: GenderRollupRow[]): GenderRollupRow[] {
 export default async function HqDashboardPage({
   searchParams,
 }: PageProps<"/hq-dashboard">) {
+  const gate = await adminGateOrNull("/hq-dashboard");
+  if (gate) return gate;
+
   const profile = await getCurrentProfile();
   const params = await searchParams;
   const supabase = await createClient();
 
   const errorMessage = Array.isArray(params.error) ? params.error[0] : params.error;
+  const copiedCount = Array.isArray(params.copied) ? params.copied[0] : params.copied;
   const { from, to } = resolveMonthRangeParams(params.from, params.to);
   const fromStart = monthStartDate(from);
   const toStart = monthStartDate(to);
   const periodLabel = from === to ? from : `${from} 〜 ${to}`;
-  // 集客費の入力（マス目編集）は範囲の終端月に対して行う — 合算値のセルは編集できないため。
-  const editMonth = to;
-  const editMonthStart = toStart;
+  // 集客費の入力対象月はサマリーの表示期間（from/to）とは独立させる — 過去月の
+  // 金額だけ直したい、といった操作をサマリー期間を動かさずに行えるようにするため。
+  const requestedEditMonth = Array.isArray(params.editMonth)
+    ? params.editMonth[0]
+    : params.editMonth;
+  const editMonth = requestedEditMonth ?? to;
+  const editMonthStart = monthStartDate(editMonth);
 
   let scope: string;
   let heading = "";
@@ -232,6 +249,7 @@ export default async function HqDashboardPage({
     { data: genderPerf },
     { data: scopeStores },
     { data: channels },
+    { data: editMonthPerf },
   ] = await Promise.all([
     (isCompany
       ? supabase.from("channel_performance_company").select("*")
@@ -260,13 +278,23 @@ export default async function HqDashboardPage({
           .eq("area_id", scope)
           .order("code"),
     supabase.from("channels").select("id, name").eq("is_active", true).order("sort_order"),
+    (isCompany
+      ? supabase.from("channel_performance_company").select("patient_count")
+      : supabase.from("channel_performance_by_area").select("patient_count").eq("area_id", scope)
+    ).eq("month", editMonthStart),
   ]);
+  const editMonthPatientCount = (editMonthPerf ?? []).reduce(
+    (sum, row) => sum + row.patient_count,
+    0,
+  );
 
   const channelRows = aggregateChannelRows(
     (channelPerf ?? []) as ChannelPerformanceRow[],
   ).sort((a, b) => b.patient_count - a.patient_count);
+  // 担当者別ランキングは成約率（Closing Rate）が高い順。
   const staffRows = aggregateStaffRows((staffPerf ?? []) as StaffRollupRow[]).sort(
-    (a, b) => b.patient_count - a.patient_count,
+    (a, b) =>
+      rate(b.contracted_count, b.closing_count) - rate(a.contracted_count, a.closing_count),
   );
   const genderRows = aggregateGenderRows((genderPerf ?? []) as GenderRollupRow[]).sort(
     (a, b) => b.patient_count - a.patient_count,
@@ -285,9 +313,20 @@ export default async function HqDashboardPage({
       cpa: row.patient_count === 0 ? null : Math.round(row.spend_amount / row.patient_count),
     }))
     .sort((a, b) => b.amount - a.amount);
+  const channelChartOrder = new Map((channels ?? []).map((channel, index) => [channel.id, index]));
   const cpaChartData = cpaRows
     .filter((row): row is typeof row & { cpa: number } => row.cpa !== null)
-    .map((row) => ({ label: row.channelName, cpa: row.cpa }));
+    .map((row) => ({
+      label: row.channelName,
+      cpa: row.cpa,
+      color:
+        CHANNEL_CHART_PALETTE[
+          (channelChartOrder.get(row.channelId) ?? 0) % CHANNEL_CHART_PALETTE.length
+        ],
+    }));
+  const totalSpend = cpaRows.reduce((sum, row) => sum + row.amount, 0);
+  const totalCpa =
+    storeTotal.patient_count === 0 ? null : Math.round(totalSpend / storeTotal.patient_count);
 
   // --- 集客費マトリクス（媒体×店舗、前月の金額を初期値として引き継ぐ） ---
   const spendStoreIds = (scopeStores ?? []).map((store) => store.id);
@@ -332,6 +371,24 @@ export default async function HqDashboardPage({
     }
   }
 
+  // --- 集客費マトリクスの合計（行=媒体ごと、列=店舗ごと、右下=総合計） ---
+  const channelSpendTotals = new Map<string, number>();
+  const storeSpendTotals = new Map<string, number>();
+  let spendGrandTotal = 0;
+  for (const store of scopeStores ?? []) {
+    let storeSum = 0;
+    const channelMap = spendMatrix.get(store.id);
+    for (const channel of channels ?? []) {
+      const amount = channelMap?.get(channel.id)?.amount ?? 0;
+      storeSum += amount;
+      channelSpendTotals.set(channel.id, (channelSpendTotals.get(channel.id) ?? 0) + amount);
+    }
+    storeSpendTotals.set(store.id, storeSum);
+    spendGrandTotal += storeSum;
+  }
+  const editMonthAverageCpa =
+    editMonthPatientCount === 0 ? null : Math.round(spendGrandTotal / editMonthPatientCount);
+
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-8 pb-16">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -346,19 +403,30 @@ export default async function HqDashboardPage({
       </div>
 
       {errorMessage && <p className="text-sm text-destructive">{errorMessage}</p>}
+      {copiedCount && (
+        <p className="text-sm text-emerald-600">
+          前月の集客費（{copiedCount}件）を{editMonth}に一括反映しました。
+        </p>
+      )}
 
-      <Card>
+      <Card className="border-l-4 border-l-blue-400">
         <CardContent>
           <h2 className="mb-3 text-sm font-medium">サマリー（{periodLabel}）</h2>
           <div className="mb-4 grid grid-cols-3 gap-3">
-            <StatTile label="集客数（初診数）" value={`${storeTotal.patient_count}人`} />
+            <StatTile
+              label="集客数（初診数）"
+              value={`${storeTotal.patient_count}人`}
+              tone="blue"
+            />
             <StatTile
               label="初診率"
               value={formatPercent(storeTotal.second_visit_count, storeTotal.patient_count)}
+              tone="blue"
             />
             <StatTile
               label="成約率"
               value={formatPercent(storeTotal.contracted_count, storeTotal.patient_count)}
+              tone="emerald"
             />
           </div>
           <div className="max-w-xs">
@@ -422,23 +490,79 @@ export default async function HqDashboardPage({
         </div>
       </div>
 
-      <Card>
+      <Card className="border-l-4 border-l-amber-400">
         <CardContent>
-          <h2 className="mb-1 text-sm font-medium">集客費・CPA分析（{periodLabel}）</h2>
-          <p className="mb-4 text-xs text-muted-foreground">
-            集客費は期間内の合計、CPAは期間合計の集客費 ÷ 期間合計の来店数です。
-          </p>
+          <h2 className="mb-4 text-sm font-medium">集客費・CPA分析</h2>
+
+          <div className="mb-6 rounded-lg bg-amber-50/60 p-4">
+            <h3 className="mb-1 text-sm font-semibold">期間合計（{periodLabel}）</h3>
+            <p className="mb-3 text-xs text-muted-foreground">
+              画面上部の「対象期間」で選んだ範囲の集計です。CPAは期間合計の集客費 ÷
+              期間合計の来店数。無効化した店舗の実績も含みます（下の月別入力は現在有効な店舗のみが対象のため、金額が一致しないことがあります）。
+            </p>
+            <div className="grid grid-cols-2 gap-3 sm:max-w-md">
+              <StatTile
+                label="集客費合計"
+                value={`¥${totalSpend.toLocaleString()}`}
+                tone="amber"
+              />
+              <StatTile
+                label="CPA・全体平均"
+                value={totalCpa === null ? "—" : `¥${totalCpa.toLocaleString()}`}
+                tone="amber"
+              />
+            </div>
+          </div>
 
           {profile.role === "admin" && scopeStores && scopeStores.length > 0 && (
-            <div className="mb-5 border-b pb-5">
+            <div className="mb-5 border-t pt-6">
+              <h3 className="mb-1 text-sm font-semibold">集客費の入力（月別）</h3>
               <p className="mb-3 text-xs text-muted-foreground">
-                集客費の入力は{editMonth}分を編集しています（複数月の合算値は入力できないため、期間の終端月を編集します）。未入力のマスは前月の金額を薄い枠で表示します（そのままクリック外せば前月と同額で保存、書き換えれば新しい金額で保存）。横にスクロールすると全店舗、媒体名は常に左端に固定されます。
+                上の「期間合計」とは別に、任意の1か月を選んで集客費を入力・修正できます（現在有効な店舗のみが対象）。ここで月を変えても、上部の対象期間は変わりません。
+              </p>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-muted-foreground">入力対象月</span>
+                  <EditMonthSelect value={editMonth} />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  上のプルダウンで月を選ぶと、その月に保存済みの金額がそのまま表に読み込まれます。
+                </p>
+              </div>
+
+              <div className="mb-4 flex items-center gap-2 rounded-lg border border-dashed bg-muted/40 px-3 py-2">
+                <ConfirmCheckbox
+                  action={copyPreviousMonthSpends}
+                  hidden={{ scope, period: editMonth, from, to }}
+                  confirmMessage={`${prevMonthOf(editMonth)}の集客費を全店舗・全媒体ぶん、${editMonth}にコピーして実データとして一括保存します。${editMonth}に入力済みの金額は失われます。よろしいですか？`}
+                  label={`前月（${prevMonthOf(editMonth)}）の費用を全店舗に一括反映する`}
+                />
+                <p className="text-xs text-muted-foreground">
+                  チェックすると{editMonth}の入力済みセルはすべて前月の金額で上書き保存されます（各セルは保存後も個別に上書き編集できます）。
+                </p>
+              </div>
+
+              <div className="mb-4 grid grid-cols-2 gap-3 sm:max-w-md">
+                <StatTile
+                  label={`${editMonth}の集客費合計`}
+                  value={`¥${spendGrandTotal.toLocaleString()}`}
+                  tone="amber"
+                />
+                <StatTile
+                  label={`${editMonth}の平均CPA`}
+                  value={editMonthAverageCpa === null ? "—" : `¥${editMonthAverageCpa.toLocaleString()}`}
+                  tone="amber"
+                />
+              </div>
+
+              <p className="mb-3 text-xs text-muted-foreground">
+                未入力のマスは前月の金額を薄い枠で表示します（そのままクリック外せば前月と同額で保存、書き換えれば新しい金額で保存）。横にスクロールすると全店舗、媒体名は常に左端に固定されます。
               </p>
               <div className="max-h-[60vh] overflow-auto rounded-lg border">
                 <table className="border-collapse text-sm">
                   <thead>
                     <tr>
-                      <th className="sticky top-0 left-0 z-20 min-w-32 border-b border-r bg-muted px-3 py-2 text-left font-medium whitespace-nowrap">
+                      <th className="sticky top-0 left-0 z-20 w-44 min-w-44 border-b border-r bg-muted px-3 py-2 text-left font-medium whitespace-normal">
                         流入媒体
                       </th>
                       {scopeStores.map((store) => (
@@ -449,12 +573,15 @@ export default async function HqDashboardPage({
                           {store.code} {store.name}
                         </th>
                       ))}
+                      <th className="sticky top-0 right-0 z-20 min-w-28 border-b border-l bg-amber-100 px-3 py-2 text-right font-semibold whitespace-nowrap text-amber-900">
+                        合計
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
                     {(channels ?? []).map((channel) => (
                       <tr key={channel.id}>
-                        <td className="sticky left-0 z-10 border-r bg-background px-3 py-1.5 font-medium whitespace-nowrap">
+                        <td className="sticky left-0 z-10 w-44 min-w-44 border-r bg-card px-3 py-1.5 align-top font-medium break-words whitespace-normal">
                           {channel.name}
                         </td>
                         {scopeStores.map((store) => {
@@ -462,11 +589,12 @@ export default async function HqDashboardPage({
                           return (
                             <td key={store.id} className="border-t px-2 py-1.5">
                               <InlineTextField
+                                key={`${editMonth}:${store.id}:${channel.id}`}
                                 action={upsertChannelSpend}
                                 name="amount"
                                 type="number"
                                 min={0}
-                                step={1000}
+                                step={1}
                                 defaultValue={cell?.amount ?? 0}
                                 hidden={{
                                   scope,
@@ -485,12 +613,33 @@ export default async function HqDashboardPage({
                             </td>
                           );
                         })}
+                        <td className="sticky right-0 z-10 border-t border-l bg-amber-50 px-3 py-1.5 text-right font-semibold tabular-nums text-amber-900">
+                          ¥{(channelSpendTotals.get(channel.id) ?? 0).toLocaleString()}
+                        </td>
                       </tr>
                     ))}
                     {!channels?.length && (
                       <tr>
                         <td className="px-3 py-4 text-center text-muted-foreground">
                           媒体が未登録です。
+                        </td>
+                      </tr>
+                    )}
+                    {channels && channels.length > 0 && (
+                      <tr>
+                        <td className="sticky left-0 z-10 border-t border-r bg-muted px-3 py-1.5 font-semibold whitespace-nowrap">
+                          合計
+                        </td>
+                        {scopeStores.map((store) => (
+                          <td
+                            key={store.id}
+                            className="border-t bg-muted/60 px-3 py-1.5 text-right font-semibold tabular-nums"
+                          >
+                            ¥{(storeSpendTotals.get(store.id) ?? 0).toLocaleString()}
+                          </td>
+                        ))}
+                        <td className="sticky right-0 z-10 border-t border-l bg-amber-200 px-3 py-1.5 text-right font-bold tabular-nums text-amber-900">
+                          ¥{spendGrandTotal.toLocaleString()}
                         </td>
                       </tr>
                     )}
@@ -506,7 +655,7 @@ export default async function HqDashboardPage({
           )}
 
           <div className="grid gap-6 lg:grid-cols-2">
-            <div className="rounded-lg border bg-background">
+            <div className="rounded-xl border bg-card shadow-md">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -537,6 +686,22 @@ export default async function HqDashboardPage({
                     </TableRow>
                   )}
                 </TableBody>
+                {cpaRows.length > 0 && (
+                  <TableFooter>
+                    <TableRow>
+                      <TableCell className="font-medium">総合計</TableCell>
+                      <TableCell className="text-right tabular-nums font-semibold text-primary">
+                        ¥{totalSpend.toLocaleString()}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums font-medium">
+                        {storeTotal.patient_count}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums font-semibold text-primary">
+                        {totalCpa === null ? "—" : `¥${totalCpa.toLocaleString()}`}
+                      </TableCell>
+                    </TableRow>
+                  </TableFooter>
+                )}
               </Table>
             </div>
             {cpaChartData.length > 0 ? (

@@ -11,17 +11,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { adminGateOrNull } from "@/lib/admin-gate";
 import { createStore } from "../actions";
 
 export default async function NewStorePage({
   searchParams,
 }: PageProps<"/dashboard/master/stores/new">) {
+  const gate = await adminGateOrNull("/dashboard/master/stores/new");
+  if (gate) return gate;
+
   const { error } = await searchParams;
 
   const supabase = await createClient();
   const { data: areas } = await supabase
     .from("areas")
     .select("id, name")
+    .eq("is_deleted", false)
     .order("name");
 
   return (

@@ -40,7 +40,7 @@ export function StaffCrossChart({
     .map((row) => ({
       label: row.channel_name,
       初診率: Number(rate(row.second_visit_count, row.patient_count).toFixed(1)),
-      成約率: Number(rate(row.contracted_count, row.patient_count).toFixed(1)),
+      成約率: Number(rate(row.contracted_count, row.closing_count).toFixed(1)),
     }));
 
   const genderData = staffGenderRows
@@ -48,7 +48,7 @@ export function StaffCrossChart({
     .map((row) => ({
       label: GENDER_LABEL[row.gender],
       初診率: Number(rate(row.second_visit_count, row.patient_count).toFixed(1)),
-      成約率: Number(rate(row.contracted_count, row.patient_count).toFixed(1)),
+      成約率: Number(rate(row.contracted_count, row.closing_count).toFixed(1)),
     }));
 
   return (

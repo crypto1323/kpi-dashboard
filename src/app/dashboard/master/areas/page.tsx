@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
+import { adminGateOrNull } from "@/lib/admin-gate";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -10,13 +11,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { setAreaActive } from "./actions";
+import { ConfirmSubmitButton } from "@/components/confirm-submit-button";
+import { deleteArea, setAreaActive } from "./actions";
 
 export default async function AreasPage() {
+  const gate = await adminGateOrNull("/dashboard/master/areas");
+  if (gate) return gate;
+
   const supabase = await createClient();
   const { data: areas } = await supabase
     .from("areas")
     .select("*")
+    .eq("is_deleted", false)
     .order("name");
 
   return (
@@ -27,7 +33,7 @@ export default async function AreasPage() {
           + 新規エリア
         </Button>
       </div>
-      <div className="rounded-lg border bg-background">
+      <div className="rounded-xl border bg-card shadow-md">
         <Table>
           <TableHeader>
             <TableRow>
@@ -64,6 +70,16 @@ export default async function AreasPage() {
                       <Button type="submit" variant="ghost" size="sm">
                         {area.is_active ? "無効化" : "有効化"}
                       </Button>
+                    </form>
+                    <form action={deleteArea}>
+                      <input type="hidden" name="id" value={area.id} />
+                      <ConfirmSubmitButton
+                        confirmMessage={`「${area.name}」を削除しますか？このエリアに属する店舗の過去データは残りますが、一覧には表示されなくなります。`}
+                        variant="destructive"
+                        size="sm"
+                      >
+                        削除
+                      </ConfirmSubmitButton>
                     </form>
                   </div>
                 </TableCell>

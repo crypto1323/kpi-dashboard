@@ -3,11 +3,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
+import { adminGateOrNull } from "@/lib/admin-gate";
 import { createChannel } from "../actions";
 
 export default async function NewChannelPage({
   searchParams,
 }: PageProps<"/dashboard/master/channels/new">) {
+  const gate = await adminGateOrNull("/dashboard/master/channels/new");
+  if (gate) return gate;
+
   const { error } = await searchParams;
 
   return (

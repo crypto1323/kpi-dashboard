@@ -1,18 +1,16 @@
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
 
 const NAV = [
   { href: "/dashboard/master/areas", label: "エリア" },
   { href: "/dashboard/master/stores", label: "店舗" },
   { href: "/dashboard/master/channels", label: "流入媒体" },
-  { href: "/dashboard/master/users", label: "ユーザー" },
 ];
 
-export default async function MasterLayout({
-  children,
-}: LayoutProps<"/dashboard/master">) {
-  await requireAdmin();
-
+/** No auth check here on purpose — Next.js caches layouts client-side and
+ * does not re-run them on sibling navigation, so a layout-level password
+ * check can keep showing stale "unlocked" content after the cookie is
+ * cleared elsewhere. Every page under here checks adminGateOrNull() itself. */
+export default function MasterLayout({ children }: LayoutProps<"/dashboard/master">) {
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-6">
       <div>

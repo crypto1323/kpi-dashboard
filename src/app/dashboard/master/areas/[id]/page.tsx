@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { adminGateOrNull } from "@/lib/admin-gate";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,6 +15,9 @@ export default async function EditAreaPage({
   const { id } = await params;
   const { error } = await searchParams;
 
+  const gate = await adminGateOrNull(`/dashboard/master/areas/${id}`);
+  if (gate) return gate;
+
   const supabase = await createClient();
   const { data: area } = await supabase
     .from("areas")
@@ -21,7 +25,7 @@ export default async function EditAreaPage({
     .eq("id", id)
     .single();
 
-  if (!area) notFound();
+  if (!area || area.is_deleted) notFound();
 
   const updateAreaWithId = updateArea.bind(null, id);
 
