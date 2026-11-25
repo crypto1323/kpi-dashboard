@@ -1,0 +1,37 @@
+# Supabase（無料プラン）は 7日間アクセスが無いと自動で一時停止するため、
+# 毎日1回だけ自動でアクセスして、止まらないようにする。
+# 必要な設定：GitHub の Settings → Secrets and variables → Actions に
+#   SUPABASE_URL … https://xxxx.supabase.co
+#   SUPABASE_KEY … secret キー（sb_secret_… または service_role）
+name: Supabase を起こしておく
+
+on:
+  schedule:
+    - cron: "0 18 * * *"   # 毎日 日本時間 3:00
+  workflow_dispatch:        # 「Run workflow」ボタンで手動でも実行できる
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Supabase にアクセス
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "::error::GitHub の Secrets に SUPABASE_URL と SUPABASE_KEY を登録してください。"
+            exit 1
+          fi
+          URL="${SUPABASE_URL%/}"
+          code=$(curl -s -o /tmp/res.txt -w "%{http_code}" --max-time 60 \
+            -H "apikey: $SUPABASE_KEY" \
+            "$URL/rest/v1/app_store?select=key&limit=1")
+          echo "HTTP $code"
+          if [ "$code" != "200" ]; then
+            head -c 300 /tmp/res.txt; echo
+            echo "::error::Supabase にアクセスできませんでした（HTTP $code）。プロジェクトが一時停止していないか確認してください。"
+            exit 1
+          fi
+          echo "OK：Supabase は動いています。"
