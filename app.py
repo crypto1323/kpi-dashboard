@@ -1240,8 +1240,28 @@ try:
     shared_targets = store_get("targets")
     config = store_get("config")
     file_index = store_get("files")  # 保存したファイルの一覧（名前・種類・対象月・保存先）
-except Exception:  # noqa: BLE001  Supabase に接続できない（一時停止中など）
-    st.error("データの保存先に接続できません。しばらくしてからページを再読み込みしてください。解決しない場合は管理者にご連絡ください。")
+except Exception as e:  # noqa: BLE001  Supabase に接続できない（一時停止中など）
+    detail = f"{type(e).__name__}: {e}"
+    conf = supabase_conf() or {}
+    if conf.get("key"):
+        detail = detail.replace(conf["key"], "***")  # 念のためキーは表示しない
+    low = detail.lower()
+    if "pgrst205" in low or "could not find the table" in low or "does not exist" in low:
+        hint = "Supabase に app_store テーブルがありません。Supabase の SQL Editor で supabase_setup.sql を実行してください。"
+    elif "permission denied" in low or "row-level security" in low or "42501" in low:
+        hint = "Secrets の key が「secret キー（sb_secret_… または service_role）」ではありません。publishable / anon のキーは使えません。"
+    elif "invalid api key" in low or "401" in low or "unauthorized" in low or "jwt" in low:
+        hint = "Secrets の key が正しくありません。Supabase の Project Settings → API Keys から secret キーをコピーし直してください。"
+    elif any(w in low for w in ("connect", "getaddrinfo", "name or service", "nodename", "timeout", "timed out", "resolve")):
+        hint = ("Supabase に届きません。① Supabase のプロジェクトが一時停止（paused）していないか、"
+                "② Secrets の url が Project URL（https://xxxx.supabase.co）と一致しているかを確認してください。")
+    elif any(w in low for w in ("paused", "inactive", "540", "503", "502")):
+        hint = "Supabase のプロジェクトが一時停止しているようです。Supabase の画面で「Resume project」を押してください。"
+    else:
+        hint = "Secrets の url・key と、Supabase のプロジェクトの状態を確認してください。"
+    st.error(f"データの保存先に接続できません。\n\n**考えられる原因：** {hint}")
+    with st.expander("エラーの詳細（管理者向け）"):
+        st.code(detail[:800], language=None)
     st.stop()
 ss.kpi_targets = dict(shared_targets.get("kpi", DEFAULT_TARGETS))     # 一度も保存していなければ初期値
 ss.menu_targets = dict(shared_targets.get("menu_sales", {}))           # メニュー別 売上目標
